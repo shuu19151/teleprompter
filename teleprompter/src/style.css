@@ -251,26 +251,27 @@ h1 {
 .line {
   margin: 0.2em 0;
   color: var(--ink);
-  opacity: 0.22;
+  opacity: 0.8;
   font-weight: 500;
-  transform: scale(0.94);
+  transform: scale(0.98);
   transition: opacity 0.35s ease, transform 0.35s ease;
 }
 
-.line.is-mid {
+.line.is-past {
+  opacity: 0.22;
+  transform: scale(0.94);
+}
+
+.line.is-past.is-near {
   opacity: 0.4;
   transform: scale(0.96);
 }
 
-.line.is-near {
-  opacity: 0.68;
-  transform: scale(0.98);
-}
-
 .line.is-active {
   opacity: 1;
-  font-weight: 700;
+  /* weight stays 500 so the active line does not reflow */
   transform: scale(1.05);
+  text-shadow: 0.02em 0 0 currentColor, -0.02em 0 0 currentColor;
 }
 
 .gap { height: 0.9em; }
@@ -339,4 +340,18 @@ h1 {
   .stage { padding: 16px; height: 68vh; }
 
   .search { max-width: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .line,
+  .sidebar {
+    transition: none;
+  }
+
+  .line,
+  .line.is-past,
+  .line.is-past.is-near,
+  .line.is-active {
+    transform: none;
+  }
 }
