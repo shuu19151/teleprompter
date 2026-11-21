@@ -1,6 +1,8 @@
 import '@fontsource/jetbrains-mono/400.css'
 import '@fontsource/jetbrains-mono/500.css'
 import '@fontsource/jetbrains-mono/700.css'
+import '@fontsource/literata/latin-400.css'
+import '@fontsource/literata/latin-700.css'
 import './style.css'
 import { isEssayFile } from './essay-files.js'
 
@@ -8,7 +10,14 @@ const THEME_KEY = 'teleprompter:theme'
 const SPEED_KEY = 'teleprompter:speed'
 const ESSAY_KEY = 'teleprompter:essay'
 const POSITION_KEY = 'teleprompter:position'
+const FONT_KEY = 'teleprompter:fontSize'
+const FONT_MIN = 24
+const FONT_MAX = 56
+const FONT_DEFAULT = 32
+const READING_RATIO = 1 / 3
 const SAVE_DELAY = 300
+const ENTER_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4H4v4"/><path d="M16 4h4v4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/></svg>`
+const EXIT_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v5H4"/><path d="M15 4v5h5"/><path d="M4 15h5v5"/><path d="M20 15h-5v5"/></svg>`
 const LEGACY_KEYS = {
   [THEME_KEY]: 'office-essay:theme',
   [SPEED_KEY]: 'office-essay:speed',
@@ -97,6 +106,12 @@ function loadSpeed() {
   return 20
 }
 
+function loadFontSize() {
+  const saved = Number(loadJSON(FONT_KEY))
+  if (Number.isInteger(saved) && saved >= FONT_MIN && saved <= FONT_MAX) return saved
+  return FONT_DEFAULT
+}
+
 let essays = Object.entries(files)
   .filter(([path]) => isEssayFile(path))
   .sort(([a], [b]) => a.localeCompare(b))
@@ -108,6 +123,7 @@ const state = {
   drawer: false,
   running: false,
   speed: loadSpeed(),
+  fontSize: loadFontSize(),
   offset: 0,
 }
 
@@ -120,10 +136,28 @@ let lineNodes = []
 let lineMetrics = []
 let offsetCache = { width: 0, height: 0, focusShift: 0, max: 0 }
 let needsRestore = true
+let restoredAnchor = null
 let saveTimer = 0
 
 function pixelsPerSecond() {
   return state.speed * 2.5
+}
+
+function readingFromTop() {
+  return offsetCache.height * READING_RATIO
+}
+
+/** Script-space Y of the guide, one third down the stage. */
+function scriptFocusY() {
+  return state.offset + readingFromTop() - offsetCache.focusShift
+}
+
+function offsetForFraction(top, height, fraction) {
+  return top + fraction * height - readingFromTop() + offsetCache.focusShift
+}
+
+function fractionAtOffset(top, height) {
+  return (scriptFocusY() - top) / (height || 1)
 }
 
 function maxOffset() {
@@ -154,6 +188,11 @@ function measure() {
   const borderTop = parseFloat(style.borderTopWidth) || 0
   const height = view.clientHeight
   const width = view.clientWidth
+  if (height > 0) {
+    const guide = height * READING_RATIO
+    script.style.paddingTop = `${guide}px`
+    script.style.paddingBottom = `${Math.max(guide, height - guide)}px`
+  }
   const nodes = [...script.querySelectorAll('.line')]
   lineNodes = nodes
   lineMetrics = nodes.map((line) => {
@@ -201,8 +240,7 @@ function paintFocus(next) {
 
 function updateFocus() {
   if (!lineMetrics.length) return
-  const focusY = state.offset + offsetCache.height / 2 - offsetCache.focusShift
-  const next = findActiveIndex(focusY)
+  const next = findActiveIndex(scriptFocusY())
   if (next === activeIndex) return
   paintFocus(next)
 }
@@ -212,7 +250,7 @@ function reanchor() {
   if (anchor.width === offsetCache.width && anchor.height === offsetCache.height) return
   const metric = lineMetrics[anchor.index]
   if (!metric) return
-  const target = metric.top + anchor.fraction * metric.height - offsetCache.height / 2
+  const target = offsetForFraction(metric.top, metric.height, anchor.fraction)
   state.offset = Math.min(offsetCache.max, Math.max(0, target))
 }
 
@@ -224,9 +262,33 @@ function captureAnchor() {
   }
   anchor = {
     index: activeIndex,
-    fraction: (state.offset + offsetCache.height / 2 - metric.top) / (metric.height || 1),
+    fraction: fractionAtOffset(metric.top, metric.height),
     width: offsetCache.width,
     height: offsetCache.height,
+  }
+}
+
+function formatRemaining(seconds) {
+  const total = Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0))
+  const minutes = Math.floor(total / 60)
+  const secs = total % 60
+  return `${minutes}:${String(secs).padStart(2, '0')} left`
+}
+
+function updateProgress() {
+  const bar = document.querySelector('#progress-bar')
+  const label = document.querySelector('#progress-time')
+  if (!bar && !label) return
+  const max = offsetCache.max
+  const ratio = max > 0 ? Math.min(1, Math.max(0, state.offset / max)) : 0
+  if (bar) {
+    bar.style.transform = `scaleX(${ratio})`
+    bar.setAttribute('aria-valuenow', String(Math.round(ratio * 100)))
+  }
+  if (label) {
+    const rate = pixelsPerSecond()
+    const seconds = rate > 0 ? Math.max(0, max - state.offset) / rate : 0
+    label.textContent = formatRemaining(seconds)
   }
 }
 
@@ -236,6 +298,7 @@ function applyOffset() {
   if (script) script.style.transform = `translateY(${-state.offset}px)`
   updateFocus()
   captureAnchor()
+  updateProgress()
 }
 
 const resizeObserver = new ResizeObserver(() => {
@@ -274,7 +337,7 @@ function saveProgress() {
   writeStorage(ESSAY_KEY, JSON.stringify({ file: essay.file, code: essay.code }))
   const metric = lineMetrics[activeIndex]
   if (metric && offsetCache.height) {
-    const fraction = (state.offset + offsetCache.height / 2 - metric.top) / (metric.height || 1)
+    const fraction = fractionAtOffset(metric.top, metric.height)
     writeStorage(POSITION_KEY, JSON.stringify({ index: activeIndex, fraction }))
     return
   }
@@ -421,8 +484,9 @@ function restorePosition() {
     Number.isFinite(saved.fraction)
   ) {
     const metric = lineMetrics[saved.index]
-    const target = metric.top + saved.fraction * metric.height - offsetCache.height / 2
-    state.offset = Math.min(offsetCache.max, Math.max(0, target))
+    restoredAnchor = { index: saved.index, fraction: saved.fraction }
+    anchor = { index: saved.index, fraction: saved.fraction, width: -1, height: -1 }
+    state.offset = Math.min(offsetCache.max, Math.max(0, offsetForFraction(metric.top, metric.height, saved.fraction)))
     return
   }
   if (Number.isFinite(saved.offset)) {
@@ -530,15 +594,77 @@ function renderList() {
     : '<li class="empty">No essay matches.</li>'
 }
 
+function applyFontSize(next) {
+  const size = Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(Number(next))))
+  if (!Number.isInteger(size)) return
+  state.fontSize = size
+  writeStorage(FONT_KEY, JSON.stringify(size))
+  document.documentElement.style.setProperty('--script-size', `${size}px`)
+  const label = document.querySelector('#font-size-value')
+  if (label) label.textContent = String(size)
+  const input = document.querySelector('#font-size')
+  if (input && Number(input.value) !== size) input.value = String(size)
+  if (anchor) anchor = { index: anchor.index, fraction: anchor.fraction, width: -1, height: -1 }
+  measure()
+  applyOffset()
+  scheduleSave()
+}
+
+function stageEl() {
+  return document.querySelector('#text-view')
+}
+
+function syncFullscreenButton() {
+  const button = document.querySelector('#fullscreen')
+  const stage = stageEl()
+  if (!button || !stage) return
+  const on = stage.classList.contains('is-fullscreen')
+  button.setAttribute('aria-pressed', on ? 'true' : 'false')
+  button.setAttribute('aria-label', on ? 'Exit fullscreen' : 'Enter fullscreen')
+  button.innerHTML = on ? EXIT_ICON : ENTER_ICON
+}
+
+function setFullscreenMode(on) {
+  const stage = stageEl()
+  if (!stage) return
+  stage.classList.toggle('is-fullscreen', on)
+  document.documentElement.classList.toggle('is-reading-fullscreen', on)
+  syncFullscreenButton()
+  if (anchor) anchor = { index: anchor.index, fraction: anchor.fraction, width: -1, height: -1 }
+  measure()
+  applyOffset()
+}
+
+async function toggleFullscreen() {
+  const stage = stageEl()
+  if (!stage) return
+  const wasOn = document.fullscreenElement === stage || stage.classList.contains('is-fullscreen')
+  try {
+    if (document.fullscreenElement === stage) await document.exitFullscreen()
+    else if (!wasOn) await stage.requestFullscreen()
+  } catch {
+    /* Headless Chrome and browsers without a display reject the Fullscreen API. */
+  }
+  if (wasOn) setFullscreenMode(document.fullscreenElement === stage)
+  else setFullscreenMode(document.fullscreenElement === stage || document.fullscreenElement == null)
+}
+
 function bindSheet() {
   document.querySelector('#run')?.addEventListener('click', toggleRun)
   document.querySelector('#to-top')?.addEventListener('click', toTop)
+  document.querySelector('#fullscreen')?.addEventListener('click', () => {
+    toggleFullscreen()
+  })
   document.querySelector('#speed')?.addEventListener('input', (event) => {
     const next = Number(event.target.value)
     state.speed = next
     writeStorage(SPEED_KEY, JSON.stringify(next))
     const label = document.querySelector('#speed-value')
     if (label) label.textContent = String(next)
+    updateProgress()
+  })
+  document.querySelector('#font-size')?.addEventListener('input', (event) => {
+    applyFontSize(event.target.value)
   })
   document.querySelector('#text-view')?.addEventListener(
     'wheel',
@@ -571,14 +697,29 @@ function renderSheet() {
     <div class="read">
       <div class="transport">
         <button class="btn ${state.running ? '' : 'btn-next'}" id="run" type="button" aria-pressed="${state.running ? 'true' : 'false'}">${state.running ? 'Pause' : 'Run'}</button>
-        <label class="speed">
-          Speed
-          <input id="speed" type="range" min="1" max="50" step="1" value="${state.speed}" aria-label="Speed" />
-          <span id="speed-value">${state.speed}</span>
-        </label>
+        <div class="sliders">
+          <label class="speed">
+            Speed
+            <input id="speed" type="range" min="1" max="50" step="1" value="${state.speed}" aria-label="Speed" />
+            <span id="speed-value">${state.speed}</span>
+          </label>
+          <label class="font-size">
+            Size
+            <input id="font-size" type="range" min="${FONT_MIN}" max="${FONT_MAX}" step="1" value="${state.fontSize}" aria-label="Font size" />
+            <span id="font-size-value">${state.fontSize}</span>
+          </label>
+        </div>
       </div>
       <div class="stage" id="text-view">
+        <div class="guide" aria-hidden="true"></div>
         <div class="script" id="text-script">${renderLines(essay.body)}</div>
+        <div class="progress">
+          <div class="progress-track">
+            <div class="progress-bar" id="progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Reading progress"></div>
+          </div>
+          <span id="progress-time">0:00 left</span>
+        </div>
+        <button class="btn fullscreen" id="fullscreen" type="button" aria-pressed="false" aria-label="Enter fullscreen">${ENTER_ICON}</button>
         <button class="btn to-top" id="to-top" type="button" aria-label="To the top">
           <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 19V6" />
@@ -673,13 +814,17 @@ function escapeAttr(value) {
 
 readStorage(THEME_KEY)
 restoreEssay()
+document.documentElement.style.setProperty('--script-size', `${state.fontSize}px`)
 mount()
 
 if (document.fonts?.ready) {
   document.fonts.ready.then(() => {
-    const saved = anchor
+    const saved = restoredAnchor || (anchor && { index: anchor.index, fraction: anchor.fraction })
+    restoredAnchor = null
     measure()
-    if (saved) anchor = { index: saved.index, fraction: saved.fraction, width: -1, height: -1 }
+    if (saved && Number.isInteger(saved.index)) {
+      anchor = { index: saved.index, fraction: saved.fraction, width: -1, height: -1 }
+    }
     applyOffset()
   })
 }
@@ -689,13 +834,30 @@ document.addEventListener('visibilitychange', () => {
 })
 window.addEventListener('beforeunload', saveProgressNow)
 
+document.addEventListener('fullscreenchange', () => {
+  const stage = stageEl()
+  setFullscreenMode(!!stage && document.fullscreenElement === stage)
+})
+
 document.addEventListener('keydown', (event) => {
   const target = event.target
   const typing =
     target instanceof HTMLTextAreaElement ||
     target.isContentEditable ||
     (target instanceof HTMLInputElement && ['search', 'text'].includes(target.type))
-  if (event.key !== ' ' || typing) return
-  event.preventDefault()
-  if (!event.repeat) toggleRun()
+  if (event.key === 'Escape') {
+    const stage = stageEl()
+    if (stage?.classList.contains('is-fullscreen') && document.fullscreenElement !== stage) setFullscreenMode(false)
+    return
+  }
+  if (event.key === ' ') {
+    if (typing) return
+    event.preventDefault()
+    if (!event.repeat) toggleRun()
+    return
+  }
+  if ((event.key === 'f' || event.key === 'F') && !typing && !event.repeat && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault()
+    toggleFullscreen()
+  }
 })

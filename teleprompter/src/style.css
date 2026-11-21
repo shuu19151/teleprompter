@@ -13,6 +13,8 @@
   --green-tile: #e8efd9;
   --radius: 12px;
   --font: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --serif: "Literata", "Source Serif 4", "Source Serif Pro", Georgia, "Iowan Old Style", Palatino, serif;
+  --script-size: 32px;
   color-scheme: light;
 }
 
@@ -37,9 +39,7 @@
 html, body, #app { height: 100%; margin: 0; }
 
 body {
-  background:
-    radial-gradient(120% 80% at 50% 0%, color-mix(in srgb, var(--rust) 12%, transparent), transparent 60%),
-    var(--paper);
+  background: var(--paper);
   color: var(--ink);
   font-family: var(--font);
 }
@@ -152,7 +152,6 @@ button, input { font: inherit; color: inherit; }
 .essay.is-on {
   background: var(--green-tile);
   border-color: var(--edge);
-  box-shadow: 1.5px 2.5px 0 var(--edge);
 }
 
 .code { color: var(--rust); font-size: 12px; font-weight: 700; }
@@ -175,33 +174,44 @@ button, input { font: inherit; color: inherit; }
 
 h1 {
   margin: 8px 0;
+  font-family: var(--serif);
   font-size: clamp(26px, 4vw, 40px);
+  font-weight: 700;
   line-height: 1.2;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.03em;
 }
 
 .transport {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   margin-bottom: 10px;
 }
 
-.speed {
+.sliders {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px 16px;
+  margin-left: auto;
+}
+
+.speed, .font-size {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  margin-left: auto;
   color: var(--muted);
   font-size: 14px;
 }
 
-.speed input {
-  width: min(220px, 40vw);
+.speed input, .font-size input {
+  width: min(160px, 28vw);
   accent-color: var(--ink);
 }
 
-#speed-value {
+#speed-value, #font-size-value {
   min-width: 1.6em;
   color: var(--ink);
   font-weight: 700;
@@ -240,47 +250,111 @@ h1 {
   background: linear-gradient(to top, var(--sheet), transparent);
 }
 
+.guide {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 33.333%;
+  z-index: 2;
+  height: 0;
+  border-top: 1px solid color-mix(in srgb, var(--rust) 48%, transparent);
+  pointer-events: none;
+}
+
+.guide::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: -4px;
+  width: 3px;
+  height: 8px;
+  border-radius: 1px;
+  background: var(--rust);
+}
+
 .script {
-  padding-top: 30vh;
-  padding-bottom: 30vh;
-  text-align: center;
-  font-size: 28px;
+  padding-top: 34vh;
+  padding-bottom: 68vh;
+  text-align: left;
+  font-family: var(--serif);
+  font-size: var(--script-size);
+  font-weight: 400;
   line-height: 1.45;
 }
 
 .line {
+  position: relative;
   margin: 0.2em 0;
+  padding-left: 0.7em;
   color: var(--ink);
   opacity: 0.8;
-  font-weight: 500;
-  transform: scale(0.98);
-  transition: opacity 0.35s ease, transform 0.35s ease;
+  font-weight: 400;
+  transition: opacity 0.35s ease;
 }
 
 .line.is-past {
   opacity: 0.22;
-  transform: scale(0.94);
 }
 
 .line.is-past.is-near {
   opacity: 0.4;
-  transform: scale(0.96);
 }
 
 .line.is-active {
   opacity: 1;
-  /* weight stays 500 so the active line does not reflow */
-  transform: scale(1.05);
-  text-shadow: 0.02em 0 0 currentColor, -0.02em 0 0 currentColor;
+}
+
+.line.is-active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.15em;
+  bottom: 0.15em;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--rust);
 }
 
 .gap { height: 0.9em; }
 
-.btn.to-top {
+.progress {
   position: absolute;
-  right: 14px;
-  bottom: 14px;
-  z-index: 2;
+  z-index: 3;
+  left: 14px;
+  right: 58px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.progress-track {
+  flex: 1;
+  height: 3px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--ink) 16%, transparent);
+  overflow: hidden;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: var(--rust);
+}
+
+#progress-time {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.btn.to-top, .btn.fullscreen {
+  position: absolute;
+  z-index: 3;
   display: grid;
   place-items: center;
   width: 36px;
@@ -289,17 +363,24 @@ h1 {
   background: var(--sheet);
 }
 
+.btn.to-top { right: 14px; bottom: 14px; }
+
+.btn.fullscreen { top: 12px; right: 14px; }
+
 .btn:focus-visible,
 .tool:focus-visible,
 .menu:focus-visible,
 .dot:focus-visible,
 .essay:focus-visible,
+.font-size input:focus-visible,
 .speed input:focus-visible {
   outline: 2px solid var(--rust);
   outline-offset: 2px;
 }
 
 .btn { height: 40px; padding: 0 14px; }
+
+#run { box-shadow: 1.5px 2.5px 0 var(--edge); }
 
 .btn-next {
   background: var(--ink);
@@ -353,16 +434,32 @@ h1 {
   .search { max-width: none; }
 }
 
+.stage:fullscreen,
+.stage.is-fullscreen {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border-radius: 0;
+  background: var(--sheet);
+}
+
+.stage.is-fullscreen:not(:fullscreen) {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+}
+
+html.is-reading-fullscreen .topbar,
+html.is-reading-fullscreen .sidebar,
+html.is-reading-fullscreen .backdrop,
+html.is-reading-fullscreen .head,
+html.is-reading-fullscreen .transport {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .line,
   .sidebar {
     transition: none;
-  }
-
-  .line,
-  .line.is-past,
-  .line.is-past.is-near,
-  .line.is-active {
-    transform: none;
   }
 }
