@@ -1,0 +1,342 @@
+:root {
+  --paper: #f4ebe0;
+  --paper-2: #f7efe4;
+  --sheet: #f9f2e8;
+  --card: #f8f0e6;
+  --line: #ddd3c5;
+  --line-strong: #c6bbac;
+  --edge: #46413b;
+  --ink: #1d1b18;
+  --ink-2: #34302b;
+  --muted: #6f6961;
+  --rust: #d0683a;
+  --green-tile: #e8efd9;
+  --radius: 12px;
+  --font: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --paper: #211e1a;
+  --paper-2: #25211c;
+  --sheet: #28241f;
+  --card: #26231e;
+  --line: #342f28;
+  --line-strong: #4a433a;
+  --edge: #efe6d6;
+  --ink: #efe6d6;
+  --ink-2: #ddd3c2;
+  --muted: #a3998b;
+  --rust: #e8834d;
+  --green-tile: #2a3324;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app { height: 100%; margin: 0; }
+
+body {
+  background:
+    radial-gradient(120% 80% at 50% 0%, color-mix(in srgb, var(--rust) 12%, transparent), transparent 60%),
+    var(--paper);
+  color: var(--ink);
+  font-family: var(--font);
+}
+
+button, input { font: inherit; color: inherit; }
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.window {
+  display: grid;
+  grid-template-rows: 54px minmax(0, 1fr);
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1.5px solid var(--edge);
+  background: var(--paper);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  white-space: nowrap;
+}
+
+.search { flex: 1; max-width: 360px; margin-left: auto; }
+
+.search input {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--card);
+}
+
+.search input:focus { outline: 2px solid var(--rust); border-color: transparent; }
+
+.tool, .menu, .btn, .lesson, .dot {
+  border: 1.5px solid var(--line-strong);
+  background: var(--card);
+  border-radius: 9px;
+  cursor: pointer;
+}
+
+.tool, .menu {
+  height: 36px;
+  padding: 0 12px;
+}
+
+.menu { display: none; }
+
+.body {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.sidebar {
+  overflow: auto;
+  padding: 16px 12px 24px;
+  border-right: 1.5px solid var(--edge);
+  background: var(--paper-2);
+}
+
+.side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 8px 10px;
+}
+
+.side-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.reload {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.sidebar ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+
+.lesson {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.lesson.is-on {
+  background: var(--green-tile);
+  border-color: var(--edge);
+  box-shadow: 1.5px 2.5px 0 var(--edge);
+}
+
+.code { color: var(--rust); font-size: 12px; font-weight: 700; }
+
+.name { font-size: 13px; line-height: 1.4; }
+
+.backdrop { display: none; }
+
+.sheet {
+  min-height: 0;
+  overflow: auto;
+  padding: 28px 32px 24px;
+}
+
+.head, .read { max-width: 960px; margin-left: auto; margin-right: auto; }
+
+.head { margin-bottom: 14px; }
+
+.kicker { margin: 0; color: var(--muted); font-size: 12px; letter-spacing: 0.04em; }
+
+h1 {
+  margin: 8px 0;
+  font-size: clamp(26px, 4vw, 40px);
+  line-height: 1.2;
+  letter-spacing: -0.04em;
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.speed input {
+  width: min(220px, 40vw);
+  accent-color: var(--ink);
+}
+
+#speed-value {
+  min-width: 1.6em;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.stage {
+  position: relative;
+  height: 62vh;
+  min-height: 220px;
+  overflow: hidden;
+  padding: 22px 28px;
+  border: 1.5px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  box-shadow: 1.5px 2.5px 0 var(--edge);
+}
+
+.stage::before,
+.stage::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 36px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.stage::before {
+  top: 0;
+  background: linear-gradient(to bottom, var(--sheet), transparent);
+}
+
+.stage::after {
+  bottom: 0;
+  background: linear-gradient(to top, var(--sheet), transparent);
+}
+
+.script {
+  padding-top: 30vh;
+  padding-bottom: 30vh;
+  text-align: center;
+  font-size: 28px;
+  line-height: 1.45;
+}
+
+.line {
+  margin: 0.2em 0;
+  color: var(--ink);
+  opacity: 0.22;
+  font-weight: 500;
+  transform: scale(0.94);
+  transition: opacity 0.35s ease, transform 0.35s ease;
+}
+
+.line.is-mid {
+  opacity: 0.4;
+  transform: scale(0.96);
+}
+
+.line.is-near {
+  opacity: 0.68;
+  transform: scale(0.98);
+}
+
+.line.is-active {
+  opacity: 1;
+  font-weight: 700;
+  transform: scale(1.05);
+}
+
+.gap { height: 0.9em; }
+
+.btn.to-top {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  background: var(--sheet);
+}
+
+.btn:focus-visible,
+.tool:focus-visible,
+.menu:focus-visible,
+.dot:focus-visible,
+.lesson:focus-visible,
+.speed input:focus-visible {
+  outline: 2px solid var(--rust);
+  outline-offset: 2px;
+}
+
+.btn { height: 40px; padding: 0 14px; }
+
+.btn-next {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+
+.btn:disabled { opacity: 0.4; cursor: default; }
+
+.empty { color: var(--muted); padding: 8px; }
+
+@media (max-width: 900px) {
+  .menu { display: inline-flex; align-items: center; }
+  .body { display: block; }
+  .sidebar {
+    position: fixed;
+    z-index: 20;
+    top: 54px;
+    bottom: 0;
+    left: 0;
+    width: min(330px, 88vw);
+    transform: translateX(-105%);
+    transition: transform 0.25s ease;
+  }
+  .is-drawer .sidebar { transform: none; }
+  .backdrop {
+    display: block;
+    position: fixed;
+    inset: 54px 0 0;
+    z-index: 15;
+    border: 0;
+    background: rgb(29 27 24 / 35%);
+    opacity: 0;
+    pointer-events: none;
+  }
+  .is-drawer .backdrop { opacity: 1; pointer-events: auto; }
+  .sheet { padding: 18px 14px 28px; }
+  .stage { padding: 16px; height: 68vh; }
+
+  .search { max-width: none; }
+}

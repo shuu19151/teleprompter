@@ -1,0 +1,14 @@
+{
+  "name": "teleprompter",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.2.6"
+  },
+  "devDependencies": {
+    "vite": "^6.3.5"
+  }
+}
