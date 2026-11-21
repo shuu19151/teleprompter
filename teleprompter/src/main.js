@@ -2,6 +2,7 @@ import '@fontsource/jetbrains-mono/400.css'
 import '@fontsource/jetbrains-mono/500.css'
 import '@fontsource/jetbrains-mono/700.css'
 import './style.css'
+import { isEssayFile } from './essay-files.js'
 
 const THEME_KEY = 'teleprompter:theme'
 const SPEED_KEY = 'teleprompter:speed'
@@ -13,6 +14,7 @@ const LEGACY_KEYS = {
   [SPEED_KEY]: 'office-essay:speed',
 }
 
+// Case-sensitive E*.txt, matching isEssayFile and /api/essays.
 const files = import.meta.glob('../../essays/E*.txt', { query: '?raw', import: 'default', eager: true })
 
 const SMALL = new Set(['a', 'an', 'and', 'at', 'for', 'in', 'of', 'on', 'or', 'the', 'to', 'vs'])
@@ -96,6 +98,7 @@ function loadSpeed() {
 }
 
 let essays = Object.entries(files)
+  .filter(([path]) => isEssayFile(path))
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([path, raw]) => parseEssay(path, raw))
 
@@ -245,6 +248,7 @@ function syncRunButton() {
   if (!button) return
   button.textContent = state.running ? 'Pause' : 'Run'
   button.classList.toggle('btn-next', !state.running)
+  button.setAttribute('aria-pressed', state.running ? 'true' : 'false')
 }
 
 function stopLoop() {
@@ -426,35 +430,60 @@ function restorePosition() {
   }
 }
 
+function setLoadError(message) {
+  const host = document.querySelector('#sidebar')
+  if (!host) return
+  let note = host.querySelector('#load-error')
+  if (!message) {
+    note?.remove()
+    return
+  }
+  if (!note) {
+    note = document.createElement('p')
+    note.id = 'load-error'
+    note.className = 'load-error'
+    note.setAttribute('role', 'status')
+    host.querySelector('.side-head')?.insertAdjacentElement('afterend', note)
+  }
+  note.textContent = message
+}
+
 async function reloadEssays() {
-  const response = await fetch('/api/essays', { cache: 'no-store' })
-  if (!response.ok) return
-  const data = await response.json()
-  const next = data
-    .map((item) => parseEssay(item.file, item.text))
-    .sort((a, b) => a.file.localeCompare(b.file))
-  const currentFile = essays[state.index]?.file
-  essays = next
-  const found = essays.findIndex((item) => item.file === currentFile)
-  if (found === -1) {
-    state.index = 0
-    state.offset = 0
-    wheelLeft = 0
-    state.running = false
-    anchor = null
-    stopLoop()
-  } else {
-    state.index = found
+  setLoadError('')
+  try {
+    const response = await fetch('/api/essays', { cache: 'no-store' })
+    if (!response.ok) throw new Error(`status ${response.status}`)
+    const data = await response.json()
+    if (!Array.isArray(data)) throw new Error('bad payload')
+    const next = data
+      .filter((item) => item && typeof item.file === 'string' && typeof item.text === 'string' && isEssayFile(item.file))
+      .map((item) => parseEssay(item.file, item.text))
+      .sort((a, b) => a.file.localeCompare(b.file))
+    const currentFile = essays[state.index]?.file
+    essays = next
+    const found = essays.findIndex((item) => item.file === currentFile)
+    if (found === -1) {
+      state.index = 0
+      state.offset = 0
+      wheelLeft = 0
+      state.running = false
+      anchor = null
+      stopLoop()
+    } else {
+      state.index = found
+    }
+    renderList()
+    renderSheet()
+    const limit = maxOffset()
+    if (state.offset > limit) {
+      state.offset = limit
+      wheelLeft = 0
+      applyOffset()
+    }
+    saveProgressNow()
+  } catch {
+    setLoadError('Could not reload essays. The list is only available from the dev server.')
   }
-  renderList()
-  renderSheet()
-  const limit = maxOffset()
-  if (state.offset > limit) {
-    state.offset = limit
-    wheelLeft = 0
-    applyOffset()
-  }
-  saveProgressNow()
 }
 
 function select(index) {
@@ -478,6 +507,8 @@ function select(index) {
 function setDrawer(open) {
   state.drawer = open
   document.querySelector('.window')?.classList.toggle('is-drawer', open)
+  const menu = document.querySelector('#menu')
+  if (menu) menu.setAttribute('aria-expanded', open ? 'true' : 'false')
 }
 
 function renderList() {
@@ -489,14 +520,14 @@ function renderList() {
         .map(
           ({ essay: item, index }) => `
         <li>
-          <button class="lesson ${index === state.index ? 'is-on' : ''}" type="button" data-index="${index}">
-            <span class="code">${item.code}</span>
+          <button class="essay ${index === state.index ? 'is-on' : ''}" type="button" data-index="${index}">
+            <span class="code">${escapeHtml(item.code)}</span>
             <span class="name">${escapeHtml(item.title)}</span>
           </button>
         </li>`,
         )
         .join('')
-    : '<li class="empty">No lesson matches.</li>'
+    : '<li class="empty">No essay matches.</li>'
 }
 
 function bindSheet() {
@@ -534,12 +565,12 @@ function renderSheet() {
   }
   sheet.innerHTML = `
     <div class="head">
-      <p class="kicker">${essay.code} · ${essay.words} words · ${essay.minutes} min</p>
+      <p class="kicker">${escapeHtml(essay.code)} · ${essay.words} words · ${essay.minutes} min</p>
       <h1>${escapeHtml(essay.title)}</h1>
     </div>
     <div class="read">
       <div class="transport">
-        <button class="btn ${state.running ? '' : 'btn-next'}" id="run" type="button">${state.running ? 'Pause' : 'Run'}</button>
+        <button class="btn ${state.running ? '' : 'btn-next'}" id="run" type="button" aria-pressed="${state.running ? 'true' : 'false'}">${state.running ? 'Pause' : 'Run'}</button>
         <label class="speed">
           Speed
           <input id="speed" type="range" min="1" max="50" step="1" value="${state.speed}" aria-label="Speed" />
@@ -572,8 +603,8 @@ function mount() {
   app.innerHTML = `
     <div class="window">
       <header class="topbar">
-        <button class="menu" id="menu" type="button" aria-label="Essays">Menu</button>
-        <div class="brand">Telepromter</div>
+        <button class="menu" id="menu" type="button" aria-label="Essays" aria-controls="sidebar" aria-expanded="false">Menu</button>
+        <div class="brand">Teleprompter</div>
         <label class="search">
           <span class="sr">Search essays</span>
           <input id="search" type="search" placeholder="Search essays" value="${escapeAttr(state.query)}" />
@@ -584,12 +615,16 @@ function mount() {
         <aside class="sidebar" id="sidebar">
           <div class="side-head">
             <p class="side-label">Essays</p>
-            <button class="tool reload" id="reload" type="button" aria-label="Reload essays">
+            ${
+              import.meta.env.DEV
+                ? `<button class="tool reload" id="reload" type="button" aria-label="Reload essays">
               <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 12a9 9 0 1 1-2.6-6.3" />
                 <path d="M21 4v5h-5" />
               </svg>
-            </button>
+            </button>`
+                : ''
+            }
           </div>
           <ul id="essay-list"></ul>
         </aside>
@@ -611,7 +646,7 @@ function mount() {
     setDrawer(false)
   })
   document.querySelector('#essay-list').addEventListener('click', (event) => {
-    const button = event.target.closest('.lesson')
+    const button = event.target.closest('.essay')
     if (!button) return
     select(Number(button.dataset.index))
   })
