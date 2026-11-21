@@ -11,11 +11,18 @@ const SPEED_KEY = 'teleprompter:speed'
 const ESSAY_KEY = 'teleprompter:essay'
 const POSITION_KEY = 'teleprompter:position'
 const FONT_KEY = 'teleprompter:fontSize'
+const IMPORTS_KEY = 'teleprompter:imports'
 const FONT_MIN = 24
 const FONT_MAX = 56
 const FONT_DEFAULT = 32
 const READING_RATIO = 1 / 3
 const SAVE_DELAY = 300
+const MAX_IMPORT_BYTES = 200 * 1024
+const EMPTY_IMPORT_MESSAGE = 'Paste some text or choose a .txt or .md file.'
+const SIZE_IMPORT_MESSAGE = 'That text is larger than 200 KB.'
+const TYPE_IMPORT_MESSAGE = 'Choose a .txt or .md file.'
+const READ_IMPORT_MESSAGE = 'Could not read that file.'
+const QUOTA_IMPORT_MESSAGE = 'Could not save this text because browser storage is full.'
 const ENTER_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4H4v4"/><path d="M16 4h4v4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/></svg>`
 const EXIT_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v5H4"/><path d="M15 4v5h5"/><path d="M4 15h5v5"/><path d="M20 15h-5v5"/></svg>`
 const LEGACY_KEYS = {
@@ -48,6 +55,7 @@ function parseEssay(path, raw) {
   const body = gap === -1 ? '' : text.slice(gap + 2)
   const words = text.split(/\s+/).filter(Boolean).length
   return {
+    kind: 'essay',
     code,
     file,
     title: titleCase(title),
@@ -55,6 +63,122 @@ function parseEssay(path, raw) {
     words,
     minutes: Math.max(1, Math.round(words / 130)),
   }
+}
+
+function textBytes(value) {
+  return new TextEncoder().encode(value).length
+}
+
+function fileBaseName(name) {
+  return String(name ?? '').split(/[/\\]/).pop() ?? ''
+}
+
+function isTextFileName(name) {
+  return /\.(txt|md)$/i.test(fileBaseName(name))
+}
+
+function isMarkdownName(name) {
+  return /\.md$/i.test(fileBaseName(name))
+}
+
+function prettyFileName(name) {
+  const stripped = fileBaseName(name).replace(/\.(txt|md)$/i, '').trim()
+  if (!stripped) return ''
+  return titleCase(stripped.replace(/[-_]+/g, ' '))
+}
+
+function stripMarkdownHeadings(text) {
+  return text
+    .split('\n')
+    .map((line) => line.replace(/^#{1,6}(?:[ \t]+|$)/, ''))
+    .join('\n')
+}
+
+function clampTitle(value) {
+  const clean = value.replace(/\s+/g, ' ').trim()
+  if (clean.length <= 180) return clean
+  return `${clean.slice(0, 179).trimEnd()}…`
+}
+
+function newImportId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return `u-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function isQuotaError(error) {
+  if (!error) return false
+  if (error.name === 'QuotaExceededError' || error.name === 'NS_ERROR_DOM_QUOTA_REACHED') return true
+  return error.code === 22 || error.code === 1014
+}
+
+function loadImports() {
+  const data = loadJSON(IMPORTS_KEY)
+  if (!Array.isArray(data)) return []
+  return data
+    .filter((item) => item && typeof item.id === 'string' && typeof item.title === 'string' && typeof item.body === 'string')
+    .map((item) => ({
+      id: item.id,
+      title: item.title,
+      body: item.body,
+      createdAt: typeof item.createdAt === 'string' || typeof item.createdAt === 'number' ? item.createdAt : new Date().toISOString(),
+    }))
+}
+
+function writeImports(list) {
+  try {
+    localStorage.setItem(IMPORTS_KEY, JSON.stringify(list))
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, quota: isQuotaError(error) }
+  }
+}
+
+function readTextFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+    reader.onerror = () => reject(reader.error || new Error('read failed'))
+    reader.readAsText(file, 'UTF-8')
+  })
+}
+
+/**
+ * Same title-block split as parseEssay: text before the first blank line is the
+ * title, and the rest is the script. A typed title replaces that block. With no
+ * blank line, the first line (or the file name) is the title and the text stays
+ * on the stage. Markdown files drop leading # heading marks only.
+ */
+function parseImportedText(raw, { title = '', fileName = '', markdown = false } = {}) {
+  if (typeof raw !== 'string') return { error: EMPTY_IMPORT_MESSAGE }
+  if (textBytes(raw) > MAX_IMPORT_BYTES) return { error: SIZE_IMPORT_MESSAGE }
+  let text = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  if (markdown || isMarkdownName(fileName)) text = stripMarkdownHeadings(text)
+  text = text.trim()
+  if (!text) return { error: EMPTY_IMPORT_MESSAGE }
+
+  const gap = text.indexOf('\n\n')
+  const titleBlock = gap === -1 ? text : text.slice(0, gap)
+  const script = gap === -1 ? '' : text.slice(gap + 2)
+  const given = title.trim()
+  let finalTitle = given
+  let body = script
+  if (!finalTitle) {
+    if (script) finalTitle = titleCase(titleBlock)
+    else if (prettyFileName(fileName)) {
+      finalTitle = prettyFileName(fileName)
+      body = text
+    } else {
+      const firstLine = text.split('\n').find((line) => line.trim())?.trim() ?? ''
+      const rest = text.split('\n').slice(1).join('\n').trim()
+      finalTitle = firstLine ? titleCase(firstLine) : ''
+      body = rest || text
+    }
+  } else if (!body) {
+    body = text
+  }
+  finalTitle = clampTitle(finalTitle)
+  if (!finalTitle) finalTitle = prettyFileName(fileName) || 'Untitled'
+  return { title: finalTitle, body }
 }
 
 function readStorage(key) {
@@ -117,8 +241,16 @@ let essays = Object.entries(files)
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([path, raw]) => parseEssay(path, raw))
 
+let imports = loadImports()
+let importFileName = ''
+let importMarkdown = false
+let importReturnFocus = null
+let renamingId = null
+
 const state = {
   index: 0,
+  kind: 'essay',
+  importId: null,
   query: '',
   drawer: false,
   running: false,
@@ -331,17 +463,31 @@ function saveProgressNow() {
   saveProgress()
 }
 
+function itemKey(item) {
+  if (!item) return ''
+  return item.kind === 'import' ? item.id : item.file
+}
+
 function saveProgress() {
   const essay = current()
   if (!essay) return
-  writeStorage(ESSAY_KEY, JSON.stringify({ file: essay.file, code: essay.code }))
+  const id = itemKey(essay)
+  writeStorage(
+    ESSAY_KEY,
+    JSON.stringify({
+      file: essay.file,
+      code: essay.code,
+      kind: essay.kind || 'essay',
+      id,
+    }),
+  )
   const metric = lineMetrics[activeIndex]
   if (metric && offsetCache.height) {
     const fraction = fractionAtOffset(metric.top, metric.height)
-    writeStorage(POSITION_KEY, JSON.stringify({ index: activeIndex, fraction }))
+    writeStorage(POSITION_KEY, JSON.stringify({ index: activeIndex, fraction, id }))
     return
   }
-  writeStorage(POSITION_KEY, JSON.stringify({ offset: state.offset }))
+  writeStorage(POSITION_KEY, JSON.stringify({ offset: state.offset, id }))
 }
 
 function tick(now) {
@@ -458,25 +604,62 @@ function filtered() {
     .filter(({ essay }) => `${essay.code} ${essay.title}`.toLowerCase().includes(q))
 }
 
+function asImportEssay(item, index) {
+  const words = `${item.title}\n${item.body}`.split(/\s+/).filter(Boolean).length
+  return {
+    kind: 'import',
+    id: item.id,
+    code: `U${index + 1}`,
+    file: item.id,
+    title: item.title,
+    body: item.body,
+    words,
+    minutes: Math.max(1, Math.round(words / 130)),
+    createdAt: item.createdAt,
+  }
+}
+
 function current() {
+  if (state.kind === 'import') {
+    const index = imports.findIndex((item) => item.id === state.importId)
+    if (index !== -1) return asImportEssay(imports[index], index)
+  }
   return essays[state.index]
 }
 
 function restoreEssay() {
   const saved = loadJSON(ESSAY_KEY)
   if (!saved || typeof saved !== 'object') return
+  if (saved.kind === 'import') {
+    const id = typeof saved.id === 'string' ? saved.id : saved.file
+    if (typeof id === 'string' && imports.some((item) => item.id === id)) {
+      state.kind = 'import'
+      state.importId = id
+      return
+    }
+    state.kind = 'essay'
+    state.index = 0
+    state.importId = null
+    return
+  }
   const byFile = essays.findIndex((item) => item.file === saved.file)
   if (byFile !== -1) {
+    state.kind = 'essay'
     state.index = byFile
     return
   }
   const byCode = essays.findIndex((item) => item.code === saved.code)
-  if (byCode !== -1) state.index = byCode
+  if (byCode !== -1) {
+    state.kind = 'essay'
+    state.index = byCode
+  }
 }
 
 function restorePosition() {
   const saved = loadJSON(POSITION_KEY)
   if (!saved || typeof saved !== 'object') return
+  const key = itemKey(current())
+  if (typeof saved.id === 'string' && saved.id !== key) return
   if (
     Number.isInteger(saved.index) &&
     saved.index >= 0 &&
@@ -523,10 +706,17 @@ async function reloadEssays() {
       .filter((item) => item && typeof item.file === 'string' && typeof item.text === 'string' && isEssayFile(item.file))
       .map((item) => parseEssay(item.file, item.text))
       .sort((a, b) => a.file.localeCompare(b.file))
-    const currentFile = essays[state.index]?.file
+    const keepImport = state.kind === 'import' && imports.some((item) => item.id === state.importId)
+    const currentFile = keepImport ? null : essays[state.index]?.file
     essays = next
+    if (keepImport) {
+      renderList()
+      return
+    }
     const found = essays.findIndex((item) => item.file === currentFile)
     if (found === -1) {
+      state.kind = 'essay'
+      state.importId = null
       state.index = 0
       state.offset = 0
       wheelLeft = 0
@@ -534,6 +724,7 @@ async function reloadEssays() {
       anchor = null
       stopLoop()
     } else {
+      state.kind = 'essay'
       state.index = found
     }
     renderList()
@@ -550,12 +741,16 @@ async function reloadEssays() {
   }
 }
 
-function select(index) {
-  const changed = state.index !== index
+function selectReading({ kind, index = 0, id = null }) {
+  const prevKey = state.kind === 'import' ? state.importId : essays[state.index]?.file
+  const nextKey = kind === 'import' ? id : essays[index]?.file
+  const changed = prevKey !== nextKey
   state.running = false
   wheelLeft = 0
   stopLoop()
-  state.index = index
+  state.kind = kind
+  state.importId = kind === 'import' ? id : null
+  if (kind === 'essay') state.index = index
   state.offset = 0
   anchor = null
   setDrawer(false)
@@ -568,6 +763,16 @@ function select(index) {
   saveProgressNow()
 }
 
+function select(index) {
+  if (!Number.isInteger(index) || !essays[index]) return
+  selectReading({ kind: 'essay', index })
+}
+
+function selectImport(id) {
+  if (!imports.some((item) => item.id === id)) return
+  selectReading({ kind: 'import', id })
+}
+
 function setDrawer(open) {
   state.drawer = open
   document.querySelector('.window')?.classList.toggle('is-drawer', open)
@@ -575,7 +780,14 @@ function setDrawer(open) {
   if (menu) menu.setAttribute('aria-expanded', open ? 'true' : 'false')
 }
 
-function renderList() {
+function filteredImports() {
+  const q = state.query.trim().toLowerCase()
+  return imports
+    .map((item, index) => ({ item, index, reading: asImportEssay(item, index) }))
+    .filter(({ item, reading }) => !q || `${reading.code} ${reading.title} ${item.body}`.toLowerCase().includes(q))
+}
+
+function renderEssayList() {
   const list = filtered()
   const ul = document.querySelector('#essay-list')
   if (!ul) return
@@ -584,7 +796,7 @@ function renderList() {
         .map(
           ({ essay: item, index }) => `
         <li>
-          <button class="essay ${index === state.index ? 'is-on' : ''}" type="button" data-index="${index}">
+          <button class="essay ${state.kind !== 'import' && index === state.index ? 'is-on' : ''}" type="button" data-index="${index}">
             <span class="code">${escapeHtml(item.code)}</span>
             <span class="name">${escapeHtml(item.title)}</span>
           </button>
@@ -592,6 +804,230 @@ function renderList() {
         )
         .join('')
     : '<li class="empty">No essay matches.</li>'
+}
+
+function renderImportList() {
+  const ul = document.querySelector('#import-list')
+  if (!ul) return
+  const list = filteredImports()
+  if (!list.length) {
+    ul.innerHTML = `<li class="empty">${state.query.trim() ? 'No text matches.' : 'Nothing imported yet.'}</li>`
+    return
+  }
+  ul.innerHTML = list
+    .map(({ item, reading }) => {
+      const on = state.kind === 'import' && state.importId === item.id
+      if (renamingId === item.id) {
+        return `
+        <li>
+          <form class="rename-form" data-rename-form="${escapeAttr(item.id)}">
+            <label class="sr" for="rename-${escapeAttr(item.id)}">Rename</label>
+            <input id="rename-${escapeAttr(item.id)}" class="rename-input" type="text" maxlength="180" autocomplete="off" value="${escapeAttr(item.title)}" />
+            <button class="tool mini" type="submit">Save</button>
+            <button class="tool mini" type="button" data-cancel-rename>Cancel</button>
+          </form>
+          <p class="rename-error" role="alert" hidden></p>
+        </li>`
+      }
+      return `
+        <li class="import-row">
+          <button class="essay ${on ? 'is-on' : ''}" type="button" data-import-id="${escapeAttr(item.id)}">
+            <span class="code">${escapeHtml(reading.code)}</span>
+            <span class="name">${escapeHtml(item.title)}</span>
+          </button>
+          <div class="import-tools">
+            <button class="tool mini" type="button" data-rename="${escapeAttr(item.id)}" aria-label="Rename ${escapeAttr(item.title)}">Rename</button>
+            <button class="tool mini" type="button" data-delete="${escapeAttr(item.id)}" aria-label="Delete ${escapeAttr(item.title)}">Delete</button>
+          </div>
+        </li>`
+    })
+    .join('')
+  const input = ul.querySelector('.rename-input')
+  if (input && document.activeElement !== input) {
+    input.focus()
+    const end = input.value.length
+    input.setSelectionRange(end, end)
+  }
+}
+
+function renderList() {
+  renderEssayList()
+  renderImportList()
+}
+
+function syncHeading() {
+  const item = current()
+  if (!item) return
+  const heading = document.querySelector('.sheet h1')
+  const kicker = document.querySelector('.kicker')
+  if (heading) heading.textContent = item.title
+  if (kicker) kicker.textContent = `${item.code} · ${item.words} words · ${item.minutes} min`
+}
+
+function showDialogError(message) {
+  const note = document.querySelector('#import-error')
+  if (!note) return
+  note.hidden = false
+  note.textContent = message
+}
+
+function clearDialogError() {
+  const note = document.querySelector('#import-error')
+  if (!note) return
+  note.hidden = true
+  note.textContent = ''
+}
+
+function showImportNote(message) {
+  const note = document.querySelector('#import-note')
+  if (!note) return
+  note.hidden = false
+  note.textContent = message
+}
+
+function clearImportNote() {
+  const note = document.querySelector('#import-note')
+  if (!note) return
+  note.hidden = true
+  note.textContent = ''
+}
+
+function addImport(raw, options) {
+  const parsed = parseImportedText(raw, options)
+  if (parsed.error) return parsed
+  const item = {
+    id: newImportId(),
+    title: parsed.title,
+    body: parsed.body,
+    createdAt: new Date().toISOString(),
+  }
+  const next = [...imports, item]
+  const saved = writeImports(next)
+  if (!saved.ok) return { error: saved.quota ? QUOTA_IMPORT_MESSAGE : 'Could not save this text.' }
+  imports = next
+  clearImportNote()
+  return { item }
+}
+
+function commitRename(id, value) {
+  const title = clampTitle(value)
+  const error = document.querySelector('.rename-error')
+  if (!title) {
+    if (error) {
+      error.hidden = false
+      error.textContent = 'Enter a title.'
+    }
+    return
+  }
+  const next = imports.map((item) => (item.id === id ? { ...item, title } : item))
+  const saved = writeImports(next)
+  if (!saved.ok) {
+    showImportNote(saved.quota ? QUOTA_IMPORT_MESSAGE : 'Could not rename this text.')
+    return
+  }
+  imports = next
+  renamingId = null
+  clearImportNote()
+  renderImportList()
+  if (state.kind === 'import' && state.importId === id) {
+    syncHeading()
+    saveProgressNow()
+  }
+}
+
+function deleteImport(id) {
+  const item = imports.find((entry) => entry.id === id)
+  if (!item) return
+  if (!window.confirm(`Delete "${item.title}"?`)) return
+  const next = imports.filter((entry) => entry.id !== id)
+  const saved = writeImports(next)
+  if (!saved.ok) {
+    showImportNote(saved.quota ? QUOTA_IMPORT_MESSAGE : 'Could not delete this text.')
+    return
+  }
+  imports = next
+  if (renamingId === id) renamingId = null
+  clearImportNote()
+  if (state.kind === 'import' && state.importId === id) {
+    if (essays.length) select(0)
+    else {
+      state.kind = 'essay'
+      state.index = 0
+      state.importId = null
+      state.offset = 0
+      anchor = null
+      state.running = false
+      wheelLeft = 0
+      stopLoop()
+      renderList()
+      renderSheet()
+      saveProgressNow()
+    }
+    return
+  }
+  renderImportList()
+}
+
+function openImportDialog() {
+  const dialog = document.querySelector('#import-dialog')
+  if (!dialog || dialog.open) return
+  importReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : document.querySelector('#import-open')
+  importFileName = ''
+  importMarkdown = false
+  dialog.querySelector('form')?.reset()
+  clearDialogError()
+  dialog.showModal()
+  dialog.querySelector('#import-name')?.focus()
+}
+
+function dialogFocusables(dialog) {
+  return [...dialog.querySelectorAll('button, [href], input, textarea, select, [tabindex]:not([tabindex="-1"])')].filter((el) => {
+    if (el.disabled || el.getAttribute('aria-hidden') === 'true' || el.closest('[hidden]')) return false
+    return true
+  })
+}
+
+async function importDroppedFile(file) {
+  if (!file || !isTextFileName(file.name)) {
+    openImportDialog()
+    showDialogError(TYPE_IMPORT_MESSAGE)
+    return
+  }
+  if (file.size > MAX_IMPORT_BYTES) {
+    openImportDialog()
+    showDialogError(SIZE_IMPORT_MESSAGE)
+    return
+  }
+  let text = ''
+  try {
+    text = await readTextFile(file)
+  } catch {
+    openImportDialog()
+    showDialogError(READ_IMPORT_MESSAGE)
+    return
+  }
+  const result = addImport(text, { fileName: file.name, markdown: isMarkdownName(file.name) })
+  if (result.error) {
+    openImportDialog()
+    showDialogError(result.error)
+    return
+  }
+  document.querySelector('#import-dialog')?.close()
+  selectImport(result.item.id)
+}
+
+function isFileDrag(event) {
+  const types = event.dataTransfer?.types
+  if (!types) return false
+  return [...types].includes('Files')
+}
+
+function filesFromTransfer(transfer) {
+  const fromList = [...(transfer?.files ?? [])]
+  if (fromList.length) return fromList
+  return [...(transfer?.items ?? [])]
+    .map((item) => (item.kind === 'file' ? item.getAsFile() : null))
+    .filter(Boolean)
 }
 
 function applyFontSize(next) {
@@ -747,8 +1183,8 @@ function mount() {
         <button class="menu" id="menu" type="button" aria-label="Essays" aria-controls="sidebar" aria-expanded="false">Menu</button>
         <div class="brand">Teleprompter</div>
         <label class="search">
-          <span class="sr">Search essays</span>
-          <input id="search" type="search" placeholder="Search essays" value="${escapeAttr(state.query)}" />
+          <span class="sr">Search essays and texts</span>
+          <input id="search" type="search" placeholder="Search" value="${escapeAttr(state.query)}" />
         </label>
         <button class="tool" id="theme" type="button">${theme() === 'dark' ? 'Light' : 'Dark'}</button>
       </header>
@@ -768,11 +1204,40 @@ function mount() {
             }
           </div>
           <ul id="essay-list"></ul>
+          <div class="side-head imports-head">
+            <p class="side-label" id="imports-label">My texts</p>
+            <button class="tool" id="import-open" type="button">Import</button>
+          </div>
+          <p id="import-note" class="load-error" role="status" hidden></p>
+          <ul id="import-list" aria-labelledby="imports-label"></ul>
         </aside>
         <button class="backdrop" id="backdrop" type="button" aria-label="Close menu"></button>
         <main class="sheet"></main>
       </div>
     </div>
+    <dialog class="import-dialog" id="import-dialog" aria-labelledby="import-heading">
+      <form class="import-form" id="import-form">
+        <div class="import-head">
+          <h2 id="import-heading">Import text</h2>
+          <button class="tool mini" id="import-close" type="button" aria-label="Close">Close</button>
+        </div>
+        <label class="field">Title
+          <input id="import-name" type="text" maxlength="180" autocomplete="off" placeholder="Leave blank to use the first line" />
+        </label>
+        <label class="field">Text
+          <textarea id="import-body" rows="10" placeholder="Paste text here"></textarea>
+        </label>
+        <label class="field">File
+          <input id="import-file" type="file" accept=".txt,.md,text/plain,text/markdown" />
+        </label>
+        <p class="hint">.txt or .md, UTF-8, up to 200 KB. You can also drop a file on the window.</p>
+        <p id="import-error" class="import-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button class="btn" id="import-cancel" type="button">Cancel</button>
+          <button class="btn btn-next" id="import-save" type="submit">Import</button>
+        </div>
+      </form>
+    </dialog>
   `
   document.querySelector('#reload')?.addEventListener('click', () => {
     reloadEssays()
@@ -790,6 +1255,140 @@ function mount() {
     const button = event.target.closest('.essay')
     if (!button) return
     select(Number(button.dataset.index))
+  })
+  document.querySelector('#import-open').addEventListener('click', openImportDialog)
+  const importList = document.querySelector('#import-list')
+  importList.addEventListener('click', (event) => {
+    if (event.target.closest('[data-cancel-rename]')) {
+      renamingId = null
+      renderImportList()
+      return
+    }
+    const rename = event.target.closest('[data-rename]')
+    if (rename) {
+      renamingId = rename.dataset.rename
+      clearImportNote()
+      renderImportList()
+      return
+    }
+    const del = event.target.closest('[data-delete]')
+    if (del) {
+      deleteImport(del.dataset.delete)
+      return
+    }
+    const button = event.target.closest('[data-import-id]')
+    if (button) selectImport(button.dataset.importId)
+  })
+  importList.addEventListener('submit', (event) => {
+    const form = event.target.closest('[data-rename-form]')
+    if (!form) return
+    event.preventDefault()
+    commitRename(form.dataset.renameForm, form.querySelector('.rename-input')?.value ?? '')
+  })
+  importList.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && event.target.classList?.contains('rename-input')) {
+      event.stopPropagation()
+      renamingId = null
+      renderImportList()
+    }
+  })
+  const dialog = document.querySelector('#import-dialog')
+  const importForm = document.querySelector('#import-form')
+  dialog.addEventListener('close', () => {
+    const back = importReturnFocus
+    importReturnFocus = null
+    if (back?.isConnected) back.focus()
+    else document.querySelector('#import-open')?.focus()
+  })
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) dialog.close()
+  })
+  dialog.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.stopPropagation()
+      return
+    }
+    if (event.key !== 'Tab') return
+    const nodes = dialogFocusables(dialog)
+    if (!nodes.length) return
+    const first = nodes[0]
+    const last = nodes[nodes.length - 1]
+    const active = document.activeElement
+    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+      event.preventDefault()
+      first.focus()
+    }
+  })
+  document.querySelector('#import-close').addEventListener('click', () => dialog.close())
+  document.querySelector('#import-cancel').addEventListener('click', () => dialog.close())
+  importForm.addEventListener('submit', (event) => {
+    event.preventDefault()
+    const title = document.querySelector('#import-name')?.value ?? ''
+    const body = document.querySelector('#import-body')?.value ?? ''
+    const result = addImport(body, { title, fileName: importFileName, markdown: importMarkdown })
+    if (result.error) {
+      showDialogError(result.error)
+      return
+    }
+    dialog.close()
+    selectImport(result.item.id)
+  })
+  document.querySelector('#import-file')?.addEventListener('change', async (event) => {
+    const input = event.target
+    const file = input.files?.[0]
+    input.value = ''
+    if (!file) return
+    if (!isTextFileName(file.name)) {
+      showDialogError(TYPE_IMPORT_MESSAGE)
+      return
+    }
+    if (file.size > MAX_IMPORT_BYTES) {
+      showDialogError(SIZE_IMPORT_MESSAGE)
+      return
+    }
+    try {
+      const text = await readTextFile(file)
+      if (textBytes(text) > MAX_IMPORT_BYTES) {
+        showDialogError(SIZE_IMPORT_MESSAGE)
+        return
+      }
+      const box = document.querySelector('#import-body')
+      if (box) box.value = text
+      importFileName = file.name
+      importMarkdown = isMarkdownName(file.name)
+      clearDialogError()
+    } catch {
+      showDialogError(READ_IMPORT_MESSAGE)
+    }
+  })
+  let dragDepth = 0
+  app.addEventListener('dragenter', (event) => {
+    if (!isFileDrag(event)) return
+    event.preventDefault()
+    dragDepth += 1
+    app.classList.add('is-file-drop')
+  })
+  app.addEventListener('dragover', (event) => {
+    if (!isFileDrag(event)) return
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+  })
+  app.addEventListener('dragleave', (event) => {
+    if (!isFileDrag(event)) return
+    dragDepth = Math.max(0, dragDepth - 1)
+    if (!dragDepth) app.classList.remove('is-file-drop')
+  })
+  app.addEventListener('drop', (event) => {
+    if (!isFileDrag(event)) return
+    event.preventDefault()
+    dragDepth = 0
+    app.classList.remove('is-file-drop')
+    const dropped = filesFromTransfer(event.dataTransfer)
+    const file = dropped.find((item) => isTextFileName(item.name))
+    importDroppedFile(file || dropped[0])
   })
   const search = document.querySelector('#search')
   search.addEventListener('input', () => {
@@ -840,6 +1439,7 @@ document.addEventListener('fullscreenchange', () => {
 })
 
 document.addEventListener('keydown', (event) => {
+  if (document.querySelector('#import-dialog')?.open) return
   const target = event.target
   const typing =
     target instanceof HTMLTextAreaElement ||

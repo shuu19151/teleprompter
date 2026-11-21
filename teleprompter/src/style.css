@@ -44,7 +44,7 @@ body {
   font-family: var(--font);
 }
 
-button, input { font: inherit; color: inherit; }
+button, input, textarea { font: inherit; color: inherit; }
 
 .sr {
   position: absolute;
@@ -373,7 +373,10 @@ h1 {
 .dot:focus-visible,
 .essay:focus-visible,
 .font-size input:focus-visible,
-.speed input:focus-visible {
+.speed input:focus-visible,
+.import-form input:focus-visible,
+.import-form textarea:focus-visible,
+.rename-input:focus-visible {
   outline: 2px solid var(--rust);
   outline-offset: 2px;
 }
@@ -462,4 +465,168 @@ html.is-reading-fullscreen .transport {
   .sidebar {
     transition: none;
   }
+}
+
+.imports-head { margin-top: 22px; }
+
+.import-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.import-row .essay { min-width: 0; }
+
+.import-row .name {
+  overflow-wrap: anywhere;
+}
+
+.import-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mini {
+  height: 28px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.rename-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 4px;
+  align-items: center;
+}
+
+.rename-input {
+  min-width: 0;
+  height: 36px;
+  padding: 0 8px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--card);
+}
+
+.rename-error {
+  margin: 4px 0 0;
+  color: var(--rust);
+  font-size: 12px;
+}
+
+.import-dialog {
+  width: min(480px, calc(100vw - 32px));
+  max-height: min(640px, calc(100vh - 48px));
+  margin: 72px 28px auto auto;
+  padding: 0;
+  border: 1.5px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  color: var(--ink);
+  box-shadow: 3px 5px 0 var(--edge);
+}
+
+.import-dialog::backdrop {
+  background: rgb(20 16 12 / 55%);
+}
+
+.import-form {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+}
+
+.import-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.import-dialog h2 {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.import-form .field {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.import-form input[type="text"],
+.import-form textarea,
+.import-form input[type="file"] {
+  width: 100%;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--card);
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 14px;
+}
+
+.import-form input[type="text"] {
+  height: 40px;
+  padding: 0 12px;
+}
+
+.import-form textarea {
+  min-height: 180px;
+  padding: 10px 12px;
+  resize: vertical;
+  font-family: var(--serif);
+  line-height: 1.45;
+}
+
+.import-form input[type="file"] {
+  padding: 8px;
+  font-size: 12px;
+}
+
+.import-form .hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.import-error {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1.5px solid var(--rust);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--rust) 14%, var(--card));
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+#app.is-file-drop .window {
+  box-shadow: inset 0 0 0 3px var(--rust);
+}
+
+#app.is-file-drop .stage {
+  outline: 2px dashed var(--rust);
+  outline-offset: -8px;
+}
+
+@media (max-width: 900px) {
+  .import-dialog { margin: 16px auto; }
+  .rename-form { grid-template-columns: minmax(0, 1fr); }
 }
