@@ -3,10 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
   "dependencies": {
-    "@fontsource/jetbrains-mono": "^5.2.6"
+    "@fontsource/jetbrains-mono": "^5.2.6",
+    "@fontsource/literata": "^5.2.6"
   },
   "devDependencies": {
     "vite": "^6.3.5"
