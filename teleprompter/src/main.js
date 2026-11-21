@@ -64,6 +64,7 @@ const state = {
 let raf = 0
 let lastTime = 0
 let wheelLeft = 0
+let anchor = null
 
 function pixelsPerSecond() {
   return state.speed * 2.5
@@ -108,11 +109,38 @@ function updateFocus() {
   })
 }
 
+function reanchor(view) {
+  if (!anchor || (anchor.width === view.clientWidth && anchor.height === view.clientHeight)) return
+  const line = document.querySelectorAll('.line')[anchor.index]
+  if (!line) return
+  const target = line.offsetTop + anchor.fraction * line.offsetHeight - view.clientHeight / 2
+  state.offset = Math.min(maxOffset(), Math.max(0, target))
+}
+
+function captureAnchor(view) {
+  const line = document.querySelector('.line.is-active')
+  if (!line) {
+    anchor = null
+    return
+  }
+  anchor = {
+    index: [...document.querySelectorAll('.line')].indexOf(line),
+    fraction: (state.offset + view.clientHeight / 2 - line.offsetTop) / (line.offsetHeight || 1),
+    width: view.clientWidth,
+    height: view.clientHeight,
+  }
+}
+
 function applyOffset() {
+  const view = document.querySelector('#text-view')
   const script = document.querySelector('#text-script')
+  if (view) reanchor(view)
   if (script) script.style.transform = `translateY(${-state.offset}px)`
   updateFocus()
+  if (view) captureAnchor(view)
 }
+
+const resizeObserver = new ResizeObserver(() => applyOffset())
 
 function syncRunButton() {
   const button = document.querySelector('#run')
@@ -273,6 +301,7 @@ function select(index) {
   stopLoop()
   state.index = index
   state.offset = 0
+  anchor = null
   state.drawer = false
   render()
 }
@@ -402,6 +431,9 @@ function render() {
     const end = search.value.length
     search.setSelectionRange(end, end)
   }
+  resizeObserver.disconnect()
+  const view = document.querySelector('#text-view')
+  if (view) resizeObserver.observe(view)
   applyOffset()
   if (state.running) startLoop()
 }
@@ -419,11 +451,14 @@ function escapeAttr(value) {
 }
 
 document.addEventListener('keydown', (event) => {
-  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement
-  if (event.key === ' ' && !typing && !(event.target instanceof HTMLButtonElement)) {
-    event.preventDefault()
-    toggleRun()
-  }
+  const target = event.target
+  const typing =
+    target instanceof HTMLTextAreaElement ||
+    target.isContentEditable ||
+    (target instanceof HTMLInputElement && ['search', 'text'].includes(target.type))
+  if (event.key !== ' ' || typing) return
+  event.preventDefault()
+  if (!event.repeat) toggleRun()
 })
 
 render()
