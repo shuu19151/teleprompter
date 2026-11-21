@@ -6,9 +6,9 @@
     <title>Telepromter</title>
     <script>
       try {
-        if (JSON.parse(localStorage.getItem('office-essay:theme')) === 'dark') {
-          document.documentElement.dataset.theme = 'dark'
-        }
+        var saved = localStorage.getItem('teleprompter:theme')
+        if (saved === null) saved = localStorage.getItem('office-essay:theme')
+        if (JSON.parse(saved) === 'dark') document.documentElement.dataset.theme = 'dark'
       } catch (e) {}
     </script>
   </head>
