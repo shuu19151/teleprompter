@@ -318,10 +318,15 @@ let audioCtx = null
 let analyser = null
 let waveSource = null
 let waveMute = null
-let wavePeaks = []
+const PEAK_RING_SIZE = 16384
+const peakRing = new Float32Array(PEAK_RING_SIZE)
+let peakCount = 0
+let peakLive = 0
+let rulerBuilt = { key: '', count: 0 }
 let waveGen = 0
 let playGen = 0
 let seeking = false
+let seekAnchor = null
 let playback = null
 let shownTakes = []
 const takeUrls = new Set()
@@ -508,6 +513,21 @@ const resizeObserver = new ResizeObserver(() => {
   measure()
   applyOffset()
 })
+
+let recorderResizeObserver = null
+
+function watchRecorderSize() {
+  const visual = document.querySelector('#recorder-visual')
+  if (!visual || typeof ResizeObserver === 'undefined') return
+  if (!recorderResizeObserver) {
+    recorderResizeObserver = new ResizeObserver(() => {
+      if (panelMode === 'recording') paintRecording()
+      else if (panelMode === 'playback') paintPlayback()
+    })
+  }
+  recorderResizeObserver.disconnect()
+  recorderResizeObserver.observe(visual)
+}
 
 function syncRunButton() {
   const button = document.querySelector('#run')
@@ -815,11 +835,41 @@ async function readMicLabel(stream) {
   }
 }
 
-function waveMetrics(width, elapsedSec) {
-  const playheadX = Math.max(48, Math.min(width - 16, width * 0.66))
-  const pxPerSec = playheadX / (PLAYHEAD_AT_MS / 1000)
-  const scroll = Math.max(0, elapsedSec * pxPerSec - playheadX)
-  return { playheadX, pxPerSec, scroll }
+function resetPeaks() {
+  peakCount = 0
+  peakLive = 0
+}
+
+function pushPeak(level) {
+  peakRing[peakCount % PEAK_RING_SIZE] = level
+  peakCount += 1
+}
+
+function peakAt(index) {
+  return peakRing[index % PEAK_RING_SIZE]
+}
+
+function exportPeaks() {
+  const available = Math.min(peakCount, PEAK_RING_SIZE)
+  const origin = peakCount - available
+  const peaks = new Float32Array(available)
+  for (let i = 0; i < available; i += 1) peaks[i] = peakAt(origin + i)
+  return { peaks, origin }
+}
+
+/** x = centerX + (t - now) * pxPerSec. 3.2s still spans 66% of the width. */
+function timelineScale(width) {
+  const centerX = width / 2
+  const pxPerSec = (width * 0.66) / (PLAYHEAD_AT_MS / 1000)
+  return { centerX, pxPerSec }
+}
+
+function resetRulerTrack() {
+  rulerBuilt = { key: '', count: 0 }
+  const track = document.querySelector('#recorder-ruler-track')
+  if (!track) return
+  track.replaceChildren()
+  track.style.transform = ''
 }
 
 function fitCanvas(canvas) {
@@ -838,64 +888,46 @@ function fitCanvas(canvas) {
   return { ctx, width, height }
 }
 
-function rulerLabelStyle(x, width) {
-  const shift = x < 34 ? 0 : x > width - 34 ? -100 : -50
-  return `left:${x.toFixed(1)}px;transform:translateX(${shift}%)`
+function addRulerMark(track, index, pxPerSec) {
+  const tMs = index * RULER_STEP_MS
+  const x = (tMs / 1000) * pxPerSec
+  const major = index % 4 === 0
+  const tick = document.createElement('span')
+  tick.className = major ? 'ruler-tick major' : 'ruler-tick minor'
+  tick.style.left = `${x}px`
+  track.appendChild(tick)
+  if (!major) return
+  const label = document.createElement('span')
+  label.className = 'ruler-label'
+  label.dataset.ms = String(tMs)
+  label.style.left = `${x}px`
+  label.textContent = formatFine(tMs)
+  track.appendChild(label)
 }
 
-function paintRuler(width, elapsedMs) {
+/**
+ * Move one ruler track. Marks are created only when the scale or the set of
+ * marks changes, never on every frame. Recording stops at `now`; playback
+ * lays out the whole duration, including time still to the right of the head.
+ */
+function placeRuler(width, centerX, pxPerSec, nowSec, mode, durationSec) {
   const track = document.querySelector('#recorder-ruler-track')
-  if (!track || width <= 0) return null
-  const elapsed = Math.max(0, elapsedMs / 1000)
-  const metrics = waveMetrics(width, elapsed)
-  const startMs = (metrics.scroll / metrics.pxPerSec) * 1000
-  const endMs = ((metrics.scroll + width) / metrics.pxPerSec) * 1000
-  const first = Math.floor(startMs / RULER_STEP_MS) - 1
-  const last = Math.ceil(endMs / RULER_STEP_MS) + 1
-  let html = ''
-  const labels = []
-  for (let index = first; index <= last; index += 1) {
-    if (index < 0) continue
-    const tMs = index * RULER_STEP_MS
-    const x = (tMs / 1000) * metrics.pxPerSec - metrics.scroll
-    if (x < -48 || x > width + 48) continue
-    const major = index % 4 === 0
-    html += `<span class="ruler-tick ${major ? 'major' : 'minor'}" style="left:${x.toFixed(1)}px"></span>`
-    if (major) {
-      const text = formatFine(tMs)
-      labels.push(text)
-      html += `<span class="ruler-label" style="${rulerLabelStyle(x, width)}">${text}</span>`
-    }
+  if (!track || width <= 0 || pxPerSec <= 0) return
+  const limit = mode === 'playback' ? Math.max(0, durationSec || 0) : Math.max(0, nowSec)
+  const key =
+    mode === 'playback'
+      ? `play:${Math.round(width)}:${Math.round(pxPerSec * 100)}:${Math.round(limit * 1000)}`
+      : `rec:${Math.round(width)}:${Math.round(pxPerSec * 100)}`
+  if (rulerBuilt.key !== key) {
+    track.replaceChildren()
+    rulerBuilt = { key, count: 0 }
   }
-  track.innerHTML = html
-  track.dataset.labels = labels.join(' ')
-  return metrics
-}
-
-function paintPlaybackRuler(width, durationMs) {
-  const track = document.querySelector('#recorder-ruler-track')
-  if (!track || width <= 0) return
-  const duration = Math.max(durationMs, RULER_STEP_MS)
-  const pxPerMs = width / duration
-  const targetPx = 88
-  const candidates = [400, 800, 1600, 3200, 8000, 16000, 30000, 60000]
-  const majorMs = candidates.find((step) => step * pxPerMs >= targetPx) || 60000
-  const minorMs = majorMs / 4
-  let html = ''
-  const labels = []
-  for (let tMs = 0; tMs <= duration + 1; tMs += minorMs) {
-    const x = tMs * pxPerMs
-    if (x > width + 8) break
-    const major = Math.round(tMs / minorMs) % 4 === 0
-    html += `<span class="ruler-tick ${major ? 'major' : 'minor'}" style="left:${x.toFixed(1)}px"></span>`
-    if (major) {
-      const text = formatFine(tMs)
-      labels.push(text)
-      html += `<span class="ruler-label" style="${rulerLabelStyle(x, width)}">${text}</span>`
-    }
+  const last = Math.floor((limit * 1000) / RULER_STEP_MS + 1e-6)
+  while (rulerBuilt.count <= last) {
+    addRulerMark(track, rulerBuilt.count, pxPerSec)
+    rulerBuilt.count += 1
   }
-  track.innerHTML = html
-  track.dataset.labels = labels.join(' ')
+  track.style.transform = `translateX(${centerX - nowSec * pxPerSec}px)`
 }
 
 function drawBaseline(ctx, width, height, color) {
@@ -910,67 +942,88 @@ function barHeight(level, height) {
   return Math.max(2, shaped * (height - 6))
 }
 
-function drawLiveWave(canvas, peaks, metrics) {
-  const view = fitCanvas(canvas)
-  if (!view || !metrics) return
-  const { ctx, width, height } = view
-  const colors = themeColors()
-  ctx.clearRect(0, 0, width, height)
-  drawBaseline(ctx, width, height, colors.line)
-  ctx.fillStyle = colors.ink
-  const mid = height / 2
-  const { pxPerSec, scroll, playheadX } = metrics
-  for (let i = 0; i < peaks.length; i += 1) {
-    const t = ((i + 1) * WAVE_STEP_MS) / 1000
-    const x = t * pxPerSec - scroll
-    if (x < -3 || x > playheadX + 1) continue
-    const bar = barHeight(peaks[i], height)
-    if (bar <= 0) continue
-    ctx.fillRect(Math.round(x) - 1, mid - bar / 2, 3, bar)
-  }
+function drawBar(ctx, x, mid, bar) {
+  ctx.fillRect(Math.round(x) - 1, mid - bar / 2, 3, bar)
 }
 
-function drawPlaybackWave(canvas, peaks, ratio) {
+function drawRecordingWave(canvas, nowSec, centerX, pxPerSec) {
   const view = fitCanvas(canvas)
   if (!view) return
   const { ctx, width, height } = view
   const colors = themeColors()
   ctx.clearRect(0, 0, width, height)
   drawBaseline(ctx, width, height, colors.line)
+  ctx.save()
+  ctx.beginPath()
+  ctx.rect(0, 0, centerX, height)
+  ctx.clip()
   ctx.fillStyle = colors.ink
-  const data = peaks && peaks.length ? peaks : new Float32Array(48)
-  const slot = width / data.length
-  const barW = Math.max(1, Math.min(3, slot * 0.55))
   const mid = height / 2
-  for (let i = 0; i < data.length; i += 1) {
-    const bar = barHeight(data[i], height)
+  const step = WAVE_STEP_MS / 1000
+  const leftTime = nowSec - (centerX + 4) / pxPerSec
+  const first = Math.max(0, peakCount - PEAK_RING_SIZE, Math.floor(leftTime / step))
+  for (let i = first; i < peakCount; i += 1) {
+    const t = (i + 0.5) * step
+    const x = centerX + (t - nowSec) * pxPerSec
+    if (x < -4) continue
+    if (x > centerX) break
+    const bar = barHeight(peakAt(i), height)
     if (bar <= 0) continue
-    const x = i * slot + (slot - barW) / 2
-    ctx.fillRect(x, mid - bar / 2, barW, bar)
+    drawBar(ctx, x, mid, bar)
   }
-  const head = document.querySelector('#recorder-playhead')
-  if (head) head.style.left = `${Math.min(width, Math.max(0, ratio * width))}px`
+  const live = barHeight(peakLive, height)
+  if (live > 0) ctx.fillRect(Math.round(centerX) - 3, mid - live / 2, 3, live)
+  ctx.restore()
+}
+
+function drawPlaybackWave(canvas, peaks, origin, step, nowSec, centerX, pxPerSec) {
+  const view = fitCanvas(canvas)
+  if (!view) return
+  const { ctx, width, height } = view
+  const colors = themeColors()
+  ctx.clearRect(0, 0, width, height)
+  drawBaseline(ctx, width, height, colors.line)
+  if (!peaks?.length || !(step > 0) || !(pxPerSec > 0)) return
+  ctx.fillStyle = colors.ink
+  const mid = height / 2
+  const leftTime = nowSec - (centerX + 4) / pxPerSec
+  const rightTime = nowSec + (width - centerX + 4) / pxPerSec
+  const firstAbs = Math.floor(leftTime / step)
+  const lastAbs = Math.ceil(rightTime / step)
+  const first = Math.max(0, firstAbs - origin)
+  const last = Math.min(peaks.length, lastAbs - origin + 1)
+  for (let i = first; i < last; i += 1) {
+    const t = (origin + i + 0.5) * step
+    if (t < 0) continue
+    const x = centerX + (t - nowSec) * pxPerSec
+    if (x < -4 || x > width + 4) continue
+    const bar = barHeight(peaks[i], height)
+    if (bar <= 0) continue
+    drawBar(ctx, x, mid, bar)
+  }
 }
 
 function paintRecording() {
   if (audioCtx?.state === 'suspended') audioCtx.resume().catch(() => {})
   const elapsed = capture.elapsedMs()
+  const nowSec = Math.max(0, elapsed / 1000)
   if (capture.phase === 'recording') {
     const expected = Math.floor(elapsed / WAVE_STEP_MS)
     let guard = 0
-    while (wavePeaks.length < expected && guard < 6) {
-      wavePeaks.push(sampleLevel(analyser))
+    while (peakCount < expected && guard < 8) {
+      pushPeak(sampleLevel(analyser))
       guard += 1
     }
+    peakLive = sampleLevel(analyser)
   }
   const clock = document.querySelector('#recorder-clock')
   if (clock) clock.textContent = formatFine(elapsed)
   const canvas = document.querySelector('#recorder-wave')
   if (!canvas) return
-  const metrics = paintRuler(canvas.clientWidth, elapsed)
-  drawLiveWave(canvas, wavePeaks, metrics)
-  const head = document.querySelector('#recorder-playhead')
-  if (head && metrics) head.style.left = `${metrics.playheadX}px`
+  const width = canvas.clientWidth
+  const { centerX, pxPerSec } = timelineScale(width)
+  placeRuler(width, centerX, pxPerSec, nowSec, 'recording')
+  drawRecordingWave(canvas, nowSec, centerX, pxPerSec)
 }
 
 function startWaveLoop() {
@@ -995,21 +1048,21 @@ function playbackDuration() {
   return 0
 }
 
-function paintPlayback(forcedRatio) {
+function paintPlayback(forcedTime) {
   if (panelMode !== 'playback' || !playback) return
   const duration = playbackDuration()
-  const current = playback.audio?.currentTime || 0
-  const ratio = forcedRatio != null ? forcedRatio : duration > 0 ? Math.min(1, Math.max(0, current / duration)) : 0
-  playback.ratio = ratio
+  const current = forcedTime != null ? forcedTime : playback.audio?.currentTime || 0
+  const nowSec = duration > 0 ? Math.min(duration, Math.max(0, current)) : Math.max(0, current)
+  playback.ratio = duration > 0 ? nowSec / duration : 0
   const clock = document.querySelector('#recorder-clock')
-  if (clock) {
-    const shown = forcedRatio != null ? forcedRatio * duration : current
-    clock.textContent = `${formatFine(shown * 1000)} / ${formatFine(duration * 1000)}`
-  }
+  if (clock) clock.textContent = `${formatFine(nowSec * 1000)} / ${formatFine(duration * 1000)}`
   const canvas = document.querySelector('#recorder-wave')
   if (!canvas) return
-  drawPlaybackWave(canvas, playback.peaks, ratio)
-  paintPlaybackRuler(canvas.clientWidth, duration * 1000)
+  const width = canvas.clientWidth
+  const { centerX, pxPerSec } = timelineScale(width)
+  const step = playback.peakStep > 0 ? playback.peakStep : duration > 0 && playback.peaks?.length ? duration / playback.peaks.length : WAVE_STEP_MS / 1000
+  placeRuler(width, centerX, pxPerSec, nowSec, 'playback', duration)
+  drawPlaybackWave(canvas, playback.peaks, playback.peakOrigin || 0, step, nowSec, centerX, pxPerSec)
 }
 
 function startPlayLoop() {
@@ -1017,7 +1070,7 @@ function startPlayLoop() {
   const frame = () => {
     if (gen !== playGen) return
     if (!playback?.audio || playback.audio.paused || playback.audio.ended) return
-    paintPlayback()
+    if (!seeking) paintPlayback()
     requestAnimationFrame(frame)
   }
   requestAnimationFrame(frame)
@@ -1086,6 +1139,7 @@ function markActiveTake() {
 function releasePlayback() {
   stopPlayLoop()
   seeking = false
+  seekAnchor = null
   if (playback?.audio) {
     playback.audio.pause()
     playback.audio.removeAttribute('src')
@@ -1123,24 +1177,29 @@ function restoreRecorderPanel() {
   syncPanelChrome()
 }
 
-function ratioFromPointer(event) {
-  const canvas = document.querySelector('#recorder-wave')
-  if (!canvas) return 0
-  const rect = canvas.getBoundingClientRect()
+function timeFromPointer(event, anchor) {
+  const visual = document.querySelector('#recorder-visual')
+  if (!visual) return 0
+  const rect = visual.getBoundingClientRect()
   if (!rect.width) return 0
-  return Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
+  const x = event.clientX - rect.left
+  const centerX = rect.width / 2
+  const pxPerSec = anchor?.pxPerSec || timelineScale(rect.width).pxPerSec
+  const now = anchor?.now || 0
+  return now + (x - centerX) / pxPerSec
 }
 
-function seekPlayback(ratio) {
+function seekPlayback(timeSec) {
   const duration = playbackDuration()
   const audio = playback?.audio
   if (!audio || !duration) return
+  const time = Math.min(duration, Math.max(0, timeSec))
   try {
-    audio.currentTime = ratio * duration
+    audio.currentTime = time
   } catch {
     /* metadata not in yet */
   }
-  paintPlayback(ratio)
+  paintPlayback(time)
 }
 
 function bindWavePointer() {
@@ -1148,22 +1207,28 @@ function bindWavePointer() {
   if (!wrap) return
   wrap.addEventListener('pointerdown', (event) => {
     if (panelMode !== 'playback' || !playback) return
+    const visual = document.querySelector('#recorder-visual')
+    const rect = visual?.getBoundingClientRect()
+    const pxPerSec = rect?.width ? timelineScale(rect.width).pxPerSec : 0
+    seekAnchor = { now: playback.audio?.currentTime || 0, pxPerSec }
     seeking = true
     wrap.setPointerCapture?.(event.pointerId)
-    seekPlayback(ratioFromPointer(event))
+    seekPlayback(timeFromPointer(event, seekAnchor))
   })
   wrap.addEventListener('pointermove', (event) => {
     if (!seeking) return
-    seekPlayback(ratioFromPointer(event))
+    seekPlayback(timeFromPointer(event, seekAnchor))
   })
   const end = (event) => {
     if (!seeking) return
+    if (event) seekPlayback(timeFromPointer(event, seekAnchor))
     seeking = false
-    if (event) seekPlayback(ratioFromPointer(event))
+    seekAnchor = null
   }
   wrap.addEventListener('pointerup', end)
   wrap.addEventListener('pointercancel', () => {
     seeking = false
+    seekAnchor = null
   })
 }
 
@@ -1175,7 +1240,9 @@ async function decodeTakePeaks(blob) {
     if (ctx.state === 'suspended') await ctx.resume().catch(() => {})
     const bytes = await blob.arrayBuffer()
     const buffer = await ctx.decodeAudioData(bytes.slice(0))
-    return waveformPeaks(buffer, 200)
+    const duration = Number.isFinite(buffer.duration) ? buffer.duration : 0
+    const bars = Math.max(1, Math.min(20000, Math.ceil(duration / (WAVE_STEP_MS / 1000)) || 1))
+    return { peaks: waveformPeaks(buffer, bars), duration }
   } finally {
     ctx.close().catch(() => {})
   }
@@ -1189,7 +1256,15 @@ async function openPlayback(take) {
   const audio = new Audio()
   audio.preload = 'auto'
   audio.src = url
-  playback = { take, url, audio, peaks: take.livePeaks || null, ratio: 0 }
+  playback = {
+    take,
+    url,
+    audio,
+    peaks: take.livePeaks || null,
+    peakOrigin: take.livePeakOrigin || 0,
+    peakStep: WAVE_STEP_MS / 1000,
+    ratio: 0,
+  }
   panelMode = 'playback'
   audio.addEventListener('ended', () => {
     stopPlayLoop()
@@ -1203,9 +1278,12 @@ async function openPlayback(take) {
   paintPlayback()
   markActiveTake()
   try {
-    const peaks = await decodeTakePeaks(take.blob)
+    const decoded = await decodeTakePeaks(take.blob)
     if (playback?.take !== take) return
-    playback.peaks = peaks
+    playback.peaks = decoded.peaks
+    playback.peakOrigin = 0
+    const span = playbackDuration() || decoded.duration
+    if (span > 0 && decoded.peaks.length) playback.peakStep = span / decoded.peaks.length
     paintPlayback()
   } catch {
     if (playback?.take === take) paintPlayback()
@@ -1310,7 +1388,7 @@ function commitTake(meta, result) {
     leaveRecordingPanel()
     return Promise.resolve(null)
   }
-  const livePeaks = Float32Array.from(wavePeaks)
+  const exported = exportPeaks()
   return addTake({
     textKey: meta.textKey,
     code: meta.code,
@@ -1322,7 +1400,8 @@ function commitTake(meta, result) {
     blob: result.blob,
   })
     .then(async (saved) => {
-      saved.livePeaks = livePeaks
+      saved.livePeaks = exported.peaks
+      saved.livePeakOrigin = exported.origin
       const sameText = takeTextKey(current()) === meta.textKey
       if (sameText) {
         showRecMessage('')
@@ -1379,7 +1458,8 @@ async function startRecording() {
   closeAudioGraph()
   ensureAudioContext()
   showRecMessage('')
-  wavePeaks = []
+  resetPeaks()
+  resetRulerTrack()
   micLabel = 'Microphone'
   manualHold = false
   panelMode = 'recording'
@@ -2220,7 +2300,9 @@ function renderSheet() {
       </div>
     </div>`
   bindSheet()
+  resetRulerTrack()
   syncRecUi()
+  watchRecorderSize()
   restoreRecorderPanel()
   void renderTakes()
   const view = document.querySelector('#text-view')

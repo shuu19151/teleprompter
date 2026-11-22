@@ -24,10 +24,14 @@ export function formatFine(ms) {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(centis).padStart(2, '0')}`
 }
 
+let sampleScratch = null
+
 /** Peak and RMS of one AnalyserNode time-domain frame, 0–1. */
 export function sampleLevel(analyser) {
   if (!analyser) return 0
-  const buf = new Float32Array(analyser.fftSize)
+  const size = analyser.fftSize
+  if (!sampleScratch || sampleScratch.length !== size) sampleScratch = new Float32Array(size)
+  const buf = sampleScratch
   analyser.getFloatTimeDomainData(buf)
   let sum = 0
   let peak = 0
