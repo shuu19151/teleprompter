@@ -36,7 +36,33 @@
   color-scheme: dark;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--line-strong);
+  border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--muted);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
 
 html, body, #app { height: 100%; margin: 0; }
 
@@ -559,6 +585,22 @@ html.is-reading-fullscreen .transport {
   background: rgb(20 16 12 / 55%);
 }
 
+.import-dialog.confirm-dialog {
+  width: min(420px, calc(100vw - 32px));
+  height: fit-content;
+  max-height: calc(100vh - 48px);
+  margin: auto;
+  inset: 0;
+}
+
+.confirm-copy {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
 .import-form {
   display: grid;
   gap: 12px;
@@ -762,11 +804,43 @@ html.is-reading-fullscreen .transport {
 
 .take-row {
   display: grid;
-  gap: 6px;
-  padding: 8px;
+  padding: 0;
   border: 1.5px solid var(--line-strong);
   border-radius: 9px;
   background: var(--card);
+  cursor: pointer;
+}
+
+.take-select {
+  grid-area: 1 / 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 8px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.take-select:focus {
+  outline: none;
+}
+
+.take-select-gap {
+  display: block;
+  height: 28px;
+}
+
+.take-row:has(.take-select:focus-visible) {
+  outline: 2px solid var(--rust);
+  outline-offset: 2px;
 }
 
 .take-row.is-on {
@@ -798,12 +872,34 @@ html.is-reading-fullscreen .transport {
 }
 
 .take-actions {
+  grid-area: 1 / 1;
+  align-self: end;
+  z-index: 1;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 4px;
+  margin: 0 8px 8px;
+  pointer-events: none;
 }
 
-.take-download { text-decoration: none; }
+.take-actions > .tool {
+  pointer-events: auto;
+}
+
+a.take-download,
+a.take-download:hover,
+a.take-download:focus,
+a.take-download:active,
+a.take-download:visited {
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--ink);
+  text-decoration: none;
+}
 
 .recorder-panel {
   display: grid;
