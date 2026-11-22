@@ -1,7 +1,13 @@
 const DB_NAME = 'teleprompter'
 const DB_STORE = 'takes'
 const DB_VERSION = 1
-const MIME_TYPES = ['audio/webm;codecs=opus', 'audio/mp4']
+const MIME_TYPES = [
+  'audio/mp4;codecs=mp4a.40.2',
+  'audio/mp4;codecs=aac',
+  'audio/mp4',
+  'audio/webm;codecs=opus',
+]
+const RECORDER_TIMESLICE_MS = 1000
 
 let dbPromise = null
 let database = null
@@ -88,7 +94,7 @@ export function titleSlug(title) {
 
 export function extensionForMime(mime) {
   const type = String(mime || '').toLowerCase()
-  if (type.includes('mp4') || type.includes('m4a') || type.includes('aac')) return 'mp4'
+  if (type.includes('mp4') || type.includes('m4a') || type.includes('aac')) return 'm4a'
   return 'webm'
 }
 
@@ -100,9 +106,10 @@ export function fileStamp(date) {
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}`
 }
 
-export function takeFileName({ code, title, createdAt, extension }) {
+export function takeFileName({ code, title, createdAt, extension, mimeType, blob }) {
   const when = new Date(createdAt)
-  const ext = extension || 'webm'
+  const type = blob?.type || mimeType || ''
+  const ext = type ? extensionForMime(type) : extension || 'webm'
   return `${code}-${titleSlug(title)}-${fileStamp(when)}.${ext}`
 }
 
@@ -285,7 +292,7 @@ export function createCapture({ onError, onStopped } = {}) {
     if (phase === 'starting') cancelStart = true
   }
 
-  async function start() {
+  async function start(audio) {
     if (phase !== 'idle') return { started: false }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') throw unsupportedError()
     const mime = pickMimeType()
@@ -298,7 +305,8 @@ export function createCapture({ onError, onStopped } = {}) {
     extension = 'webm'
     let localStream = null
     try {
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const constraints = audio == null || audio === true ? true : audio
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: constraints })
       if (cancelStart || phase !== 'starting') return { started: false, cancelled: true }
       recorder = mime ? new MediaRecorder(localStream, { mimeType: mime }) : new MediaRecorder(localStream)
       stream = localStream
@@ -317,7 +325,7 @@ export function createCapture({ onError, onStopped } = {}) {
           if (phase === 'recording' || phase === 'paused') onError?.()
         })
       }
-      recorder.start()
+      recorder.start(RECORDER_TIMESLICE_MS)
       segmentStart = performance.now()
       phase = 'recording'
       return { started: true, mimeType, extension }
@@ -365,11 +373,18 @@ export function createCapture({ onError, onStopped } = {}) {
   }
 
   function takeBlob(durationMs) {
-    const blob = chunks.length ? new Blob(chunks, { type: mimeType || 'audio/webm' }) : null
+    const recordedType = chunks.find((chunk) => chunk?.type)?.type || mimeType || 'audio/webm'
+    const blob = chunks.length ? new Blob(chunks, { type: recordedType }) : null
     chunks = []
+    const actualType = blob?.type || recordedType
     const result =
       blob && blob.size > 0
-        ? { blob, durationMs: Math.max(0, durationMs), mimeType: mimeType || blob.type || 'audio/webm', extension }
+        ? {
+            blob,
+            durationMs: Math.max(0, durationMs),
+            mimeType: actualType,
+            extension: extensionForMime(actualType),
+          }
         : null
     stopTracks(stream)
     stream = null

@@ -218,7 +218,64 @@ h1 {
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
+}
+
+.mic-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  height: 20px;
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+
+.mic-row[hidden] { display: none; }
+
+.mic-icon { display: block; flex: 0 0 auto; }
+
+.mic-select {
+  appearance: none;
+  -webkit-appearance: none;
+  max-width: min(440px, 72vw);
+  margin: 0;
+  padding: 0 14px 0 0;
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 3.5 5 6.5 8 3.5' fill='none' stroke='%236f6961' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right center;
+  background-size: 10px 10px;
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+:root[data-theme="dark"] .mic-select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 3.5 5 6.5 8 3.5' fill='none' stroke='%23a3998b' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.mic-select option {
+  background: var(--card);
+  color: var(--ink);
+}
+
+.mic-select:disabled {
+  cursor: default;
+  opacity: 0.72;
+  color: var(--muted);
+  -webkit-text-fill-color: var(--muted);
+}
+
+.mic-select:focus { outline: none; }
+
+.mic-select:focus-visible {
+  outline: 2px solid var(--rust);
+  outline-offset: 2px;
 }
 
 .sliders {
@@ -519,7 +576,8 @@ html.is-reading-fullscreen .topbar,
 html.is-reading-fullscreen .sidebar,
 html.is-reading-fullscreen .backdrop,
 html.is-reading-fullscreen .head,
-html.is-reading-fullscreen .transport {
+html.is-reading-fullscreen .transport,
+html.is-reading-fullscreen .mic-row {
   display: none;
 }
 
@@ -1010,13 +1068,15 @@ a.take-download:visited {
 .recorder-mic {
   flex: 1 1 auto;
   min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: flex;
+  align-items: center;
+}
+
+.recorder-bar .mic-select {
+  flex: 0 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .recorder-clock {

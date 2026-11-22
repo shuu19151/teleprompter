@@ -27,6 +27,7 @@ const POSITION_KEY = 'teleprompter:position'
 const FONT_KEY = 'teleprompter:fontSize'
 const IMPORTS_KEY = 'teleprompter:imports'
 const REC_WITH_RUN_KEY = 'teleprompter:recWithRun'
+const MIC_KEY = 'teleprompter:micId'
 const QUOTA_TAKE_MESSAGE = 'Could not save this take because browser storage is full.'
 const SAVE_TAKE_MESSAGE = 'Could not save this take.'
 const DELETE_TAKE_MESSAGE = 'Could not delete this take.'
@@ -48,6 +49,7 @@ const PAUSE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden=
 const PLAY_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5.2v13.6l11-6.8z"/></svg>`
 const CLOSE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>`
 const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7.5 11.5 12 16l4.5-4.5"/><path d="M5 19h14"/></svg>`
+const MIC_ICON = `<svg class="mic-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/><path d="M8.5 21h7"/></svg>`
 const WAVE_STEP_MS = 40
 const RULER_STEP_MS = 400
 const RULER_MAJOR_EVERY = 4
@@ -317,8 +319,10 @@ let saveTask = null
 let pendingCommit = null
 let takesToken = 0
 let panelMode = 'closed'
-let micLabel = 'Microphone'
 let manualHold = false
+let micId = loadMicId()
+let audioInputs = []
+let micListToken = 0
 let openAfterSave = true
 let audioCtx = null
 let analyser = null
@@ -828,17 +832,121 @@ function attachAnalyser(stream) {
   waveMute.connect(ctx.destination)
 }
 
-async function readMicLabel(stream) {
-  const track = stream?.getAudioTracks?.()[0]
-  if (!track) return 'Microphone'
-  const fallback = track.label || 'Microphone'
+function loadMicId() {
   try {
-    const devices = await navigator.mediaDevices.enumerateDevices()
-    const id = track.getSettings?.().deviceId
-    const match = devices.find((device) => device.kind === 'audioinput' && id && device.deviceId === id)
-    return match?.label || fallback
+    const value = localStorage.getItem(MIC_KEY)
+    return typeof value === 'string' ? value : ''
   } catch {
-    return fallback
+    return ''
+  }
+}
+
+function saveMicId(id) {
+  micId = id || ''
+  try {
+    if (micId) localStorage.setItem(MIC_KEY, micId)
+    else localStorage.removeItem(MIC_KEY)
+  } catch {
+    /* ignore quota or private mode */
+  }
+}
+
+function recordingBusy() {
+  return capture.phase === 'starting' || capture.phase === 'recording' || capture.phase === 'paused' || capture.phase === 'stopping'
+}
+
+function syncMicControls() {
+  const row = document.querySelector('#mic-row')
+  const panelOpen = panelMode === 'recording' || panelMode === 'playback'
+  if (row) row.hidden = panelOpen
+  const busy = panelMode === 'recording' || recordingBusy()
+  for (const select of document.querySelectorAll('select.mic-select')) select.disabled = busy
+}
+
+function micOptions() {
+  if (!audioInputs.length) return [{ deviceId: '', label: 'Default microphone' }]
+  return audioInputs
+}
+
+function renderMicSelects() {
+  const options = micOptions()
+  const signature = options.map((option) => `${option.deviceId}\t${option.label}`).join('\n')
+  const known = options.some((option) => option.deviceId === micId)
+  const desired = known ? micId : options[0]?.deviceId || ''
+  for (const select of document.querySelectorAll('select.mic-select')) {
+    if (select.dataset.options !== signature) {
+      select.replaceChildren(
+        ...options.map((option) => {
+          const el = document.createElement('option')
+          el.value = option.deviceId
+          el.textContent = option.label
+          return el
+        }),
+      )
+      select.dataset.options = signature
+    }
+    if (select.value !== desired) select.value = desired
+  }
+  syncMicControls()
+}
+
+async function refreshAudioInputs() {
+  const token = ++micListToken
+  let inputs = []
+  try {
+    const devices = (await navigator.mediaDevices?.enumerateDevices?.()) || []
+    inputs = devices.filter((device) => device.kind === 'audioinput')
+  } catch {
+    inputs = []
+  }
+  if (token !== micListToken) return
+  const labeled = inputs.some((device) => device.label)
+  if (!labeled) audioInputs = []
+  else {
+    const seen = new Set()
+    audioInputs = []
+    for (const device of inputs) {
+      if (!device.deviceId || seen.has(device.deviceId)) continue
+      seen.add(device.deviceId)
+      audioInputs.push({ deviceId: device.deviceId, label: device.label.trim() || 'Microphone' })
+    }
+    if (micId && !audioInputs.some((device) => device.deviceId === micId)) saveMicId('')
+  }
+  renderMicSelects()
+}
+
+function onMicChange(event) {
+  const value = event.target.value || ''
+  if (value === micId) {
+    renderMicSelects()
+    return
+  }
+  saveMicId(value)
+  renderMicSelects()
+}
+
+function micConstraint() {
+  if (!micId) return true
+  if (audioInputs.length && !audioInputs.some((device) => device.deviceId === micId)) return true
+  return { deviceId: { exact: micId } }
+}
+
+function isMissingMicError(error) {
+  const name = error?.name || ''
+  return name === 'OverconstrainedError' || name === 'NotFoundError' || name === 'DevicesNotFoundError'
+}
+
+async function openCapture() {
+  const constraint = micConstraint()
+  try {
+    return await capture.start(constraint)
+  } catch (error) {
+    if (constraint !== true && isMissingMicError(error)) {
+      saveMicId('')
+      renderMicSelects()
+      return capture.start(true)
+    }
+    throw error
   }
 }
 
@@ -1055,6 +1163,7 @@ function stopWaveLoop() {
 function playbackDuration() {
   const audio = playback?.audio
   if (audio && Number.isFinite(audio.duration) && audio.duration > 0 && audio.duration !== Infinity) return audio.duration
+  if (Number.isFinite(playback?.decodedDuration) && playback.decodedDuration > 0) return playback.decodedDuration
   const ms = playback?.take?.durationMs
   if (ms > 0) return ms / 1000
   return 0
@@ -1123,20 +1232,7 @@ function syncPanelChrome() {
     play.setAttribute('aria-pressed', paused ? 'false' : 'true')
   }
   if (close) close.hidden = !playing
-  const mic = panel.querySelector('#recorder-mic')
-  if (mic) {
-    if (recording) {
-      mic.textContent = micLabel || 'Microphone'
-      mic.title = micLabel || 'Microphone'
-    } else if (playing) {
-      const when = formatTakeWhen(playback?.take?.createdAt)
-      mic.textContent = when
-      mic.title = when
-    } else {
-      mic.textContent = ''
-      mic.title = ''
-    }
-  }
+  syncMicControls()
   const canvas = panel.querySelector('#recorder-wave')
   if (canvas) canvas.setAttribute('aria-label', playing ? 'Playback waveform' : 'Recording waveform')
 }
@@ -1298,9 +1394,10 @@ async function openPlayback(take) {
   try {
     const decoded = await decodeTakePeaks(take.blob)
     if (playback?.take !== take) return
+    playback.decodedDuration = Number.isFinite(decoded.duration) && decoded.duration > 0 ? decoded.duration : 0
     playback.peaks = decoded.peaks
     playback.peakOrigin = 0
-    const span = playbackDuration() || decoded.duration
+    const span = playbackDuration()
     if (span > 0 && decoded.peaks.length) playback.peakStep = span / decoded.peaks.length
     paintPlayback()
   } catch {
@@ -1481,7 +1578,6 @@ async function startRecording() {
   showRecMessage('')
   resetPeaks()
   resetRulerTrack()
-  micLabel = 'Microphone'
   manualHold = false
   panelMode = 'recording'
   recordingMeta = takeMeta()
@@ -1489,7 +1585,7 @@ async function startRecording() {
   paintRecording()
   let result = null
   try {
-    result = await capture.start()
+    result = await openCapture()
   } catch (error) {
     recordingMeta = null
     panelMode = 'closed'
@@ -1518,17 +1614,7 @@ async function startRecording() {
   startWaveLoop()
   if (recWithRun) playRun()
   syncRecUi()
-  if (capture.stream) {
-    const label = await readMicLabel(capture.stream)
-    if (panelMode === 'recording' && capture.isActive()) {
-      micLabel = label
-      const mic = document.querySelector('#recorder-mic')
-      if (mic) {
-        mic.textContent = micLabel
-        mic.title = micLabel
-      }
-    }
-  }
+  if (capture.stream) void refreshAudioInputs()
 }
 
 function finishRecording(options) {
@@ -1648,7 +1734,9 @@ function recorderPanelHtml() {
             <div class="recorder-playhead" id="recorder-playhead" aria-hidden="true"></div>
           </div>
           <div class="recorder-bar">
-            <p class="recorder-mic" id="recorder-mic"></p>
+            <div class="recorder-mic">
+              <select class="mic-select" id="recorder-mic" aria-label="Microphone"></select>
+            </div>
             <p class="recorder-clock" id="recorder-clock">00:00.00</p>
             <div class="recorder-actions">
               <button class="btn icon-btn" id="recorder-stop" type="button" aria-label="Stop recording">${STOP_ICON}</button>
@@ -2239,6 +2327,9 @@ function bindSheet() {
     void toggleRecording()
   })
   document.querySelector('#rec-with-run')?.addEventListener('change', onRecWithRunChange)
+  document.querySelector('#mic-idle')?.addEventListener('change', onMicChange)
+  document.querySelector('#recorder-mic')?.addEventListener('change', onMicChange)
+  renderMicSelects()
   document.querySelector('#recorder-stop')?.addEventListener('click', () => {
     void finishRecording()
   })
@@ -2321,6 +2412,10 @@ function renderSheet() {
           </label>
         </div>
         <p class="rec-message" data-rec-message role="alert" hidden></p>
+      </div>
+      <div class="mic-row" id="mic-row">
+        ${MIC_ICON}
+        <select class="mic-select" id="mic-idle" aria-label="Microphone"></select>
       </div>
       <div class="stage-frame" id="stage-frame">
       ${recorderPanelHtml()}
@@ -2655,6 +2750,10 @@ restoreEssay()
 void warmRecordingStore()
 document.documentElement.style.setProperty('--script-size', `${state.fontSize}px`)
 mount()
+void refreshAudioInputs()
+navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+  void refreshAudioInputs()
+})
 
 if (document.fonts?.ready) {
   document.fonts.ready.then(() => {
@@ -2687,6 +2786,7 @@ document.addEventListener('fullscreenchange', () => {
 function isTypingTarget(target) {
   return (
     target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
     target.isContentEditable ||
     (target instanceof HTMLInputElement && ['search', 'text'].includes(target.type))
   )
