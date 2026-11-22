@@ -766,6 +766,7 @@ function themeColors() {
   const style = getComputedStyle(document.documentElement)
   colorCache = {
     theme,
+    wave: style.getPropertyValue('--muted').trim() || '#6f6961',
     ink: style.getPropertyValue('--ink').trim() || '#1d1b18',
     line: style.getPropertyValue('--line-strong').trim() || '#c6bbac',
   }
@@ -945,13 +946,13 @@ function drawBaseline(ctx, width, height, color) {
 }
 
 function barHeight(level, height) {
-  const shaped = Math.sqrt(Math.min(1, Math.max(0, level || 0)))
+  const shaped = Math.pow(Math.min(1, Math.max(0, level || 0)), 0.75)
   if (shaped < 0.05) return 0
   return Math.max(2, shaped * (height - 6))
 }
 
 function drawBar(ctx, x, mid, bar) {
-  ctx.fillRect(Math.round(x) - 1, mid - bar / 2, 3, bar)
+  ctx.fillRect(Math.round(x), mid - bar / 2, 1, bar)
 }
 
 function drawRecordingWave(canvas, nowSec, centerX, pxPerSec) {
@@ -965,7 +966,7 @@ function drawRecordingWave(canvas, nowSec, centerX, pxPerSec) {
   ctx.beginPath()
   ctx.rect(0, 0, centerX, height)
   ctx.clip()
-  ctx.fillStyle = colors.ink
+  ctx.fillStyle = colors.wave
   const mid = height / 2
   const step = WAVE_STEP_MS / 1000
   const leftTime = nowSec - (centerX + 4) / pxPerSec
@@ -980,7 +981,7 @@ function drawRecordingWave(canvas, nowSec, centerX, pxPerSec) {
     drawBar(ctx, x, mid, bar)
   }
   const live = barHeight(peakLive, height)
-  if (live > 0) ctx.fillRect(Math.round(centerX) - 3, mid - live / 2, 3, live)
+  if (live > 0) ctx.fillRect(Math.round(centerX) - 1, mid - live / 2, 1, live)
   ctx.restore()
 }
 
@@ -992,7 +993,7 @@ function drawPlaybackWave(canvas, peaks, origin, step, nowSec, centerX, pxPerSec
   ctx.clearRect(0, 0, width, height)
   drawBaseline(ctx, width, height, colors.line)
   if (!peaks?.length || !(step > 0) || !(pxPerSec > 0)) return
-  ctx.fillStyle = colors.ink
+  ctx.fillStyle = colors.wave
   const mid = height / 2
   const leftTime = nowSec - (centerX + 4) / pxPerSec
   const rightTime = nowSec + (width - centerX + 4) / pxPerSec
