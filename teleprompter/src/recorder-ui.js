@@ -12,6 +12,7 @@ import {
   takeFileName,
   waveformPeaks,
 } from './recording.js'
+import { saveTakeToDocuments } from './take-disk.js'
 import { bridge } from './ui-bridge.js'
 
 const REC_WITH_RUN_KEY = 'teleprompter:recWithRun'
@@ -19,6 +20,7 @@ const MIC_KEY = 'teleprompter:micId'
 const VOICE_KEY = 'teleprompter:voiceEnhance'
 const QUOTA_TAKE_MESSAGE = 'Could not save this take because browser storage is full.'
 const SAVE_TAKE_MESSAGE = 'Could not save this take.'
+const DISK_TAKE_MESSAGE = 'Could not save the take to Documents.'
 const DELETE_TAKE_MESSAGE = 'Could not delete this take.'
 const WAVE_STEP_MS = 40
 const RULER_STEP_MS = 400
@@ -935,15 +937,15 @@ function leaveRecordingPanel() {
   }
 }
 
-function commitTake(meta, result) {
+async function commitTake(meta, result) {
   closeAudioGraph()
   syncRecUi()
-  if (!result?.blob || !meta?.textKey) {
+  if (!result?.blob?.size || !meta?.textKey) {
     leaveRecordingPanel()
-    return Promise.resolve(null)
+    return null
   }
   const exported = exportPeaks()
-  return addTake({
+  const take = {
     textKey: meta.textKey,
     code: meta.code,
     title: meta.title,
@@ -952,17 +954,26 @@ function commitTake(meta, result) {
     mimeType: result.mimeType,
     extension: result.extension,
     blob: result.blob,
-  })
+  }
+  let diskError = false
+  let diskPath
+  try {
+    diskPath = await saveTakeToDocuments(take)
+  } catch {
+    diskError = true
+  }
+  if (typeof diskPath === 'string' && diskPath) take.diskPath = diskPath
+  return addTake(take)
     .then(async (saved) => {
       saved.livePeaks = exported.peaks
       saved.livePeakOrigin = exported.origin
       const sameText = takeTextKey(bridge.current()) === meta.textKey
       if (sameText) {
-        showRecMessage('')
         await renderTakes()
         if (openAfterSave) await openPlayback(saved)
         else leaveRecordingPanel()
       } else leaveRecordingPanel()
+      if (diskError) showRecMessage(DISK_TAKE_MESSAGE)
       return saved
     })
     .catch((error) => {

@@ -7,8 +7,27 @@
   ],
   "permissions": [
     "core:default",
+    "core:window:allow-destroy",
     "dialog:default",
     "fs:allow-read-dir",
-    "fs:allow-read-text-file"
+    "fs:allow-read-text-file",
+    {
+      "identifier": "fs:allow-mkdir",
+      "allow": [{ "path": "$DOCUMENT/Teleprompter" }]
+    },
+    {
+      "identifier": "fs:allow-exists",
+      "allow": [
+        { "path": "$DOCUMENT/Teleprompter" },
+        { "path": "$DOCUMENT/Teleprompter/*" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-write-file",
+      "allow": [
+        { "path": "$DOCUMENT/Teleprompter" },
+        { "path": "$DOCUMENT/Teleprompter/*" }
+      ]
+    }
   ]
 }

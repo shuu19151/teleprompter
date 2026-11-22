@@ -37,6 +37,8 @@ npm run tauri build
 
 The setup file is `teleprompter/src-tauri/target/release/bundle/nsis/` (`*-setup.exe`). The MSI is in `teleprompter/src-tauri/target/release/bundle/msi/`. The NSIS installer is per user and does not ask for administrator rights. The installed app opens without `npm run dev`, and the bundled E01 and E02 essays are inside it.
 
+Stopping a recording also writes that take into the Windows Documents folder, `Documents\Teleprompter\`. The name matches the download name, for example `E01-how-i-stay-productive-and-calm-20261122-1804.m4a`. A second take in the same minute gets `-2` before the extension. The sidebar list is unchanged.
+
 ## Essays
 
 Essays are plain text files in `essays/` at the repo root. The name is case-sensitive: a capital `E`, then anything, then a lowercase `.txt` extension. `E01-short-title.txt` is included. `e01-short-title.txt` and `E01-short-title.TXT` are not. The same rule is used by the production glob (`E*.txt`) and by the dev-server list at `/api/essays`.

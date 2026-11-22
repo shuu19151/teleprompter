@@ -4,11 +4,13 @@ import '@fontsource/jetbrains-mono/700.css'
 import '@fontsource/literata/latin-400.css'
 import '@fontsource/literata/latin-700.css'
 import './style.css'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isEssayFile } from './essay-files.js'
 import {
   clearSavedFolder,
   folderPermission,
   folderPickerSupported,
+  inTauri,
   loadSavedFolder,
   pickEssayFolder,
   readEssayFiles,
@@ -1729,6 +1731,18 @@ bridge.askConfirm = askConfirm
 
 readStorage(THEME_KEY)
 async function start() {
+  if (inTauri()) {
+    let closing = false
+    await getCurrentWindow().onCloseRequested(async (event) => {
+      if (closing) {
+        event.preventDefault()
+        return
+      }
+      closing = true
+      saveProgressNow()
+      await stopRecordingAndSave({ openAfter: false })
+    }).catch((error) => console.error('Could not listen for window close requests.', error))
+  }
   try {
     await adoptSavedFolder()
   } catch {
