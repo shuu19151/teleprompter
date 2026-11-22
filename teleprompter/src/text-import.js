@@ -1,5 +1,9 @@
 const IMPORTS_KEY = 'teleprompter:imports'
 
+export const MAX_IMPORT_BYTES = 200 * 1024
+export const EMPTY_IMPORT_MESSAGE = 'Paste some text or choose a .txt or .md file.'
+export const SIZE_IMPORT_MESSAGE = 'That text is larger than 200 KB.'
+
 function readStorage(key) {
   try {
     return localStorage.getItem(key)

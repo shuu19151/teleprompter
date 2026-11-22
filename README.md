@@ -21,6 +21,24 @@ npm run preview
 
 `npm run build` writes a static site to `teleprompter/dist`. `npm run preview` serves that build at http://127.0.0.1:4173/. Essays are copied into the bundle when you build, so preview does not notice files added afterwards.
 
+## Windows app
+
+The desktop shell is Tauri 2. The window loads this same Vite app. From `teleprompter/`:
+
+```bash
+npm run tauri dev
+```
+
+That starts Vite at http://127.0.0.1:5173 and opens a desktop window. A Windows installer is built on Windows, with Rust MSVC, the C++ build tools, and WebView2:
+
+```bash
+npm run tauri build
+```
+
+The setup file is `teleprompter/src-tauri/target/release/bundle/nsis/` (`*-setup.exe`). The MSI is in `teleprompter/src-tauri/target/release/bundle/msi/`. The NSIS installer is per user and does not ask for administrator rights. The installed app opens without `npm run dev`, and the bundled E01 and E02 essays are inside it.
+
+Stopping a recording also writes that take into the Windows Documents folder, `Documents\Teleprompter\`. The name matches the download name, for example `E01-how-i-stay-productive-and-calm-20261122-1804.m4a`. A second take in the same minute gets `-2` before the extension. The sidebar list is unchanged. Right-click a take to play it, show that file in Explorer when this app saved it, or delete it from the list. Deleting a take leaves the file in Documents.
+
 ## Essays
 
 Essays are plain text files in `essays/` at the repo root. The name is case-sensitive: a capital `E`, then anything, then a lowercase `.txt` extension. `E01-short-title.txt` is included. `e01-short-title.txt` and `E01-short-title.TXT` are not. The same rule is used by the production glob (`E*.txt`) and by the dev-server list at `/api/essays`.
@@ -29,7 +47,9 @@ The first blank-line-separated block is the title. The rest is the script.
 
 The reload button next to Essays calls `/api/essays` until a folder is chosen. That route exists only on the Vite dev server, so the button is hidden in `build` and `preview`. On the dev server, press it to pick up a new file without restarting.
 
-Folder, the button beside Essays, opens the system folder dialog in Chrome and Edge. In another browser the button stays visible and explains that the dialog needs Chrome or Edge on http://127.0.0.1:5173. The app remembers the folder in this browser. Every file ending in `.txt`, in any letter case, that sits directly in the folder is listed. Subfolders are not read. Reload then reads that folder again, and the button stays available in a production build. Use app essays clears the choice and returns to the `essays/` files above. A cancelled dialog leaves the current list as it is. The next visit reads the folder when permission is already granted. When the browser needs a click before it can read, the sidebar asks you to press reload.
+Right-click an essay to open it. When the list comes from a chosen folder, the menu also offers Delete, and in the Windows app it offers Show in folder. Delete asks first, then removes that `.txt` file and reloads the folder. Essays shipped inside the app only offer Open. On the dev server, Chrome or Edge can delete a file in the chosen folder and does not offer Show in folder. If Show in folder cannot open the file, for an essay or a take, a note appears at the bottom-left of the window and fades away. Right-click anywhere else in the window shows no menu.
+
+Folder, the button beside Essays, opens a folder dialog. In the Windows app that dialog is the system folder picker from the Tauri dialog plugin. The chosen directory is allowed for that run, and the fs plugin reads every `.txt` file directly in it. Subfolders are not read. The path is remembered in this app. The next launch asks you to press Folder once so that directory can be allowed again. In Chrome or Edge on the dev server, Folder uses the browser folder picker instead, and a later visit can read the folder when permission is already granted. In another browser the button stays visible and explains that the dialog needs the Windows app, or Chrome or Edge at http://127.0.0.1:5173. Use app essays clears the choice and returns to the `essays/` files above. A cancelled dialog leaves the current list as it is.
 
 ## Your own text
 
@@ -37,7 +57,7 @@ Import, in the sidebar under My texts, opens a dialog where you can type a title
 
 Imported text is split the same way as a bundled essay. The first block, up to a blank line, is the title, and the rest is the script. A title you type replaces that block. If there is no blank line, a pasted text uses its first line as the title, and a file uses its file name; either way the text stays on the stage. For Markdown, a leading `#` heading mark on a line is removed and the line is kept as text. Empty text is rejected, and anything over 200 KB is rejected. Both messages appear in the dialog.
 
-Each import is stored in this browser under `teleprompter:imports` as `{ id, title, body, createdAt }`. A later edit keeps that id and `createdAt` and adds `updatedAt`. If storage is full, the dialog says so and the text is not kept. My texts lists them with codes U1, U2, and so on. The search box matches those codes, titles, and scripts as well as the essays. Edit and Delete sit on each row. Delete asks you to confirm.
+Each import is stored in this browser under `teleprompter:imports` as `{ id, title, body, createdAt }`. A later edit keeps that id and `createdAt` and adds `updatedAt`. If storage is full, the dialog says so and the text is not kept. My texts lists them with codes U1, U2, and so on. The search box matches those codes, titles, and scripts as well as the essays. Right-click a text to edit it or delete it. Delete asks you to confirm.
 
 Edit opens the same dialog, headed Edit text, with the stored title and the stored script filled in. Saving without changes writes that same script back. Save updates the entry in place. Cancel, Close, Esc, and a click on the backdrop throw the edits away. Opening Import afterwards is a blank import again, headed Import text, with the button labeled Import. The file field still replaces the script when you choose a `.txt` or `.md` file. Empty text and anything over 200 KB are rejected in the dialog, the same as import. A blank title is filled from the block before the first blank line, or from the first line when there is none. If you chose a file and the script has no blank line, the file name is used instead. The script in the box is what gets stored. For a Markdown file, a leading `#` heading mark on a line is removed, the same as import.
 
@@ -59,6 +79,6 @@ The panel then plays that take: the whole waveform and the ruler scroll under th
 
 The microphone needs a secure page. `https` works, and so does the dev server on `http://127.0.0.1`, which counts as localhost. A denied permission, a missing microphone, or a browser without recording shows a short message under the controls.
 
-"Start scrolling with recording" is on by default and is stored in `localStorage` under `teleprompter:recWithRun`. While it is on, Rec starts scrolling and recording together, and stopping the recording pauses scrolling. Pausing Run pauses the recorder, and resuming Run resumes it, using `MediaRecorder.pause` and `resume`. The panel's Pause and Resume follow that same link. While the option is off, recording keeps going when scrolling is paused, and Pause on the panel holds only the recorder. Turning the option off mid-take resumes a recorder that was paused with Run.
+"Start scrolling with recording" is on by default and is stored in `localStorage` under `teleprompter:recWithRun`. While it is on, Rec starts scrolling and recording together, and stopping the recording pauses scrolling. Reaching the last line stops scrolling and leaves the recording running until Stop. Pausing Run pauses the recorder, and resuming Run resumes it, using `MediaRecorder.pause` and `resume`. The panel's Pause and Resume follow that same link. While the option is off, recording keeps going when scrolling is paused, and Pause on the panel holds only the recorder. Turning the option off mid-take resumes a recorder that was paused with Run.
 
-Each finished take is stored in IndexedDB (database `teleprompter`, store `takes`), keyed by the essay code (`E01`) or the imported text's id, so a reload brings the same takes back. Takes for the current text are listed in the sidebar under Takes, below My texts. Each row shows the time, the duration, Play, Download, and Delete. Play loads that take into the panel. Delete asks you to confirm. Download uses `<code>-<title-slug>-<YYYYMMDD-HHMM>.m4a` when the recording is MP4 audio, and `.webm` for an Opus/WebM take, including takes already saved that way. The name comes from the text's code and title at the time of the take. If storage is full, a message under the controls says so and the take is not kept. Switching texts, hiding the page, or leaving it stops an open take and saves what was recorded. The microphone is released when the take stops. Blob URLs for downloads are revoked when the list is redrawn.
+Each finished take is stored in IndexedDB (database `teleprompter`, store `takes`), keyed by the essay code (`E01`) or the imported text's id, so a reload brings the same takes back. Takes for the current text are listed in the sidebar under Takes, below My texts. Each row shows the time and the duration. Click a row to play that take. Right-click a row to play it, show the Documents file in Explorer when this app saved it, or delete it from the list. Delete asks you to confirm and leaves the Documents file. If storage is full, a message under the controls says so and the take is not kept. Switching texts, hiding the page, or leaving it stops an open take and saves what was recorded. The microphone is released when the take stops.

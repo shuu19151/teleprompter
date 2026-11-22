@@ -5,13 +5,19 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "tauri": "tauri"
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.2.6",
-    "@fontsource/literata": "^5.2.6"
+    "@fontsource/literata": "^5.2.6",
+    "@tauri-apps/api": "^2.12.5",
+    "@tauri-apps/plugin-dialog": "^2.8.4",
+    "@tauri-apps/plugin-fs": "^2.7.1",
+    "@tauri-apps/plugin-opener": "^2.7.3"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.12.6",
     "vite": "^6.3.5"
   }
 }
