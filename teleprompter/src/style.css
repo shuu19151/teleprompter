@@ -378,8 +378,7 @@ h1 {
 .font-size input:focus-visible,
 .speed input:focus-visible,
 .import-form input:focus-visible,
-.import-form textarea:focus-visible,
-.rename-input:focus-visible {
+.import-form textarea:focus-visible {
   outline: 2px solid var(--rust);
   outline-offset: 2px;
 }
@@ -495,28 +494,6 @@ html.is-reading-fullscreen .transport {
   height: 28px;
   padding: 0 8px;
   font-size: 11px;
-}
-
-.rename-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 4px;
-  align-items: center;
-}
-
-.rename-input {
-  min-width: 0;
-  height: 36px;
-  padding: 0 8px;
-  border: 1.5px solid var(--line-strong);
-  border-radius: 9px;
-  background: var(--card);
-}
-
-.rename-error {
-  margin: 4px 0 0;
-  color: var(--rust);
-  font-size: 12px;
 }
 
 .import-dialog {
@@ -639,5 +616,4 @@ html.is-reading-fullscreen .transport {
 
 @media (max-width: 900px) {
   .import-dialog { margin: 16px auto; }
-  .rename-form { grid-template-columns: minmax(0, 1fr); }
 }
