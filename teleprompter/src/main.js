@@ -6,6 +6,16 @@ import '@fontsource/literata/latin-700.css'
 import './style.css'
 import { isEssayFile } from './essay-files.js'
 import {
+  clearSavedFolder,
+  folderPermission,
+  folderPickerSupported,
+  loadSavedFolder,
+  pickEssayFolder,
+  readEssayFiles,
+  requestFolderPermission,
+  saveFolderHandle,
+} from './essay-folder.js'
+import {
   clampTitle,
   isMarkdownName,
   isQuotaError,
@@ -73,6 +83,7 @@ const QUOTA_IMPORT_MESSAGE = 'Could not save this text because browser storage i
 const ENTER_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4H4v4"/><path d="M16 4h4v4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/></svg>`
 const EXIT_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v5H4"/><path d="M15 4v5h5"/><path d="M4 15h5v5"/><path d="M20 15h-5v5"/></svg>`
 const MIC_ICON = `<svg class="mic-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/><path d="M8.5 21h7"/></svg>`
+const FOLDER_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h5l2 2h9v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M4 7V6a1 1 0 0 1 1-1h4l2 2"/></svg>`
 const LEGACY_KEYS = {
   [THEME_KEY]: 'office-essay:theme',
   [SPEED_KEY]: 'office-essay:speed',
@@ -136,10 +147,19 @@ function loadFontSize() {
   return FONT_DEFAULT
 }
 
-let essays = Object.entries(files)
-  .filter(([path]) => isEssayFile(path))
-  .sort(([a], [b]) => a.localeCompare(b))
-  .map(([path, raw]) => parseEssay(path, raw))
+function essaysFromGlob() {
+  return Object.entries(files)
+    .filter(([path]) => isEssayFile(path))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([path, raw]) => parseEssay(path, raw))
+}
+
+const bundledEssays = essaysFromGlob()
+let essays = bundledEssays
+let folderHandle = null
+let folderName = ''
+let folderNeedsGesture = false
+let folderBootMessage = ''
 
 let imports = loadImports()
 let importFileName = ''
@@ -639,25 +659,135 @@ function restorePosition() {
 }
 
 function setLoadError(message) {
-  const host = document.querySelector('#sidebar')
-  if (!host) return
-  let note = host.querySelector('#load-error')
+  const note = document.querySelector('#load-error')
+  if (!note) return
   if (!message) {
-    note?.remove()
+    note.hidden = true
+    note.textContent = ''
     return
   }
-  if (!note) {
-    note = document.createElement('p')
-    note.id = 'load-error'
-    note.className = 'load-error'
-    note.setAttribute('role', 'status')
-    host.querySelector('.side-head')?.insertAdjacentElement('afterend', note)
-  }
+  note.hidden = false
   note.textContent = message
+}
+
+function updateFolderChrome() {
+  const reload = document.querySelector('#reload')
+  if (reload) reload.hidden = !(import.meta.env.DEV || folderHandle)
+  const name = document.querySelector('#folder-name')
+  if (name) {
+    name.hidden = !folderName
+    name.textContent = folderName
+    name.title = folderName
+  }
+  const reset = document.querySelector('#use-app-essays')
+  if (reset) reset.hidden = !folderHandle
+  if (folderNeedsGesture) {
+    setLoadError(folderName ? `Click reload to allow reading ${folderName}.` : 'Click reload to allow reading this folder.')
+  } else if (folderBootMessage) {
+    setLoadError(folderBootMessage)
+    folderBootMessage = ''
+  }
+}
+
+function applyEssayList(next) {
+  const keepImport = state.kind === 'import' && imports.some((item) => item.id === state.importId)
+  const currentFile = keepImport ? null : essays[state.index]?.file
+  essays = next
+  updateFolderChrome()
+  if (keepImport) {
+    renderList()
+    return
+  }
+  // No essay was on screen (the chosen folder was still waiting for a click).
+  // Open the saved essay in this list, including its saved line.
+  if (!currentFile) {
+    void stopRecordingAndSave()
+    state.running = false
+    wheelLeft = 0
+    stopLoop()
+    state.kind = 'essay'
+    state.importId = null
+    state.index = 0
+    state.offset = 0
+    anchor = null
+    restoreEssay()
+    renderList()
+    renderSheet()
+    restorePosition()
+    applyOffset()
+    saveProgressNow()
+    return
+  }
+  const found = essays.findIndex((item) => item.file === currentFile)
+  if (found === -1) {
+    void stopRecordingAndSave()
+    state.kind = 'essay'
+    state.importId = null
+    state.index = 0
+    state.offset = 0
+    wheelLeft = 0
+    state.running = false
+    anchor = null
+    stopLoop()
+  } else {
+    state.kind = 'essay'
+    state.index = found
+  }
+  renderList()
+  renderSheet()
+  const limit = maxOffset()
+  if (state.offset > limit) {
+    state.offset = limit
+    wheelLeft = 0
+    applyOffset()
+  }
+  saveProgressNow()
+}
+
+async function essaysFromHandle(handle) {
+  const data = await readEssayFiles(handle)
+  return data.map((item) => parseEssay(item.file, item.text))
+}
+
+async function adoptSavedFolder() {
+  if (!folderPickerSupported()) return
+  const handle = await loadSavedFolder()
+  if (!handle) return
+  folderHandle = handle
+  folderName = handle.name || 'Folder'
+  const permission = await folderPermission(handle)
+  if (permission !== 'granted') {
+    folderNeedsGesture = true
+    essays = []
+    return
+  }
+  try {
+    essays = await essaysFromHandle(handle)
+    folderNeedsGesture = false
+  } catch {
+    essays = []
+    folderBootMessage = 'Could not read that folder.'
+  }
 }
 
 async function reloadEssays() {
   setLoadError('')
+  if (folderHandle) {
+    try {
+      let permission = await folderPermission(folderHandle)
+      if (permission !== 'granted') permission = await requestFolderPermission(folderHandle)
+      if (permission !== 'granted') {
+        folderNeedsGesture = true
+        updateFolderChrome()
+        return
+      }
+      folderNeedsGesture = false
+      applyEssayList(await essaysFromHandle(folderHandle))
+    } catch {
+      setLoadError('Could not read that folder.')
+    }
+    return
+  }
   try {
     const response = await fetch('/api/essays', { cache: 'no-store' })
     if (!response.ok) throw new Error(`status ${response.status}`)
@@ -667,40 +797,55 @@ async function reloadEssays() {
       .filter((item) => item && typeof item.file === 'string' && typeof item.text === 'string' && isEssayFile(item.file))
       .map((item) => parseEssay(item.file, item.text))
       .sort((a, b) => a.file.localeCompare(b.file))
-    const keepImport = state.kind === 'import' && imports.some((item) => item.id === state.importId)
-    const currentFile = keepImport ? null : essays[state.index]?.file
-    essays = next
-    if (keepImport) {
-      renderList()
-      return
-    }
-    const found = essays.findIndex((item) => item.file === currentFile)
-    if (found === -1) {
-      void stopRecordingAndSave()
-      state.kind = 'essay'
-      state.importId = null
-      state.index = 0
-      state.offset = 0
-      wheelLeft = 0
-      state.running = false
-      anchor = null
-      stopLoop()
-    } else {
-      state.kind = 'essay'
-      state.index = found
-    }
-    renderList()
-    renderSheet()
-    const limit = maxOffset()
-    if (state.offset > limit) {
-      state.offset = limit
-      wheelLeft = 0
-      applyOffset()
-    }
-    saveProgressNow()
+    applyEssayList(next)
   } catch {
     setLoadError('Could not reload essays. The list is only available from the dev server.')
   }
+}
+
+async function chooseFolder() {
+  if (!folderPickerSupported()) {
+    setLoadError('This browser cannot open a folder. Use Chrome or Edge at http://127.0.0.1:5173.')
+    return
+  }
+  let handle
+  try {
+    handle = await pickEssayFolder()
+  } catch (error) {
+    if (error?.name === 'AbortError') return
+    setLoadError('Could not open that folder.')
+    return
+  }
+  folderHandle = handle
+  folderName = handle.name || 'Folder'
+  folderNeedsGesture = false
+  let rememberError = false
+  try {
+    await saveFolderHandle(handle)
+  } catch {
+    rememberError = true
+  }
+  try {
+    applyEssayList(await essaysFromHandle(handle))
+    setLoadError(rememberError ? 'Could not remember this folder in this browser.' : '')
+  } catch {
+    setLoadError('Could not read that folder.')
+    updateFolderChrome()
+  }
+}
+
+async function useBundledEssays() {
+  let forgetError = false
+  try {
+    await clearSavedFolder()
+  } catch {
+    forgetError = true
+  }
+  folderHandle = null
+  folderName = ''
+  folderNeedsGesture = false
+  applyEssayList(bundledEssays)
+  setLoadError(forgetError ? 'Could not forget this folder. It may come back on the next visit.' : '')
 }
 
 function selectReading({ kind, index = 0, id = null }) {
@@ -755,6 +900,13 @@ function renderEssayList() {
   const list = filtered()
   const ul = document.querySelector('#essay-list')
   if (!ul) return
+  const empty = state.query.trim()
+    ? 'No essay matches.'
+    : folderNeedsGesture
+      ? 'Allow this folder to show its essays.'
+      : folderHandle
+        ? 'No .txt files in this folder.'
+        : 'No essay matches.'
   ul.innerHTML = list.length
     ? list
         .map(
@@ -767,7 +919,7 @@ function renderEssayList() {
         </li>`,
         )
         .join('')
-    : '<li class="empty">No essay matches.</li>'
+    : `<li class="empty">${escapeHtml(empty)}</li>`
 }
 
 function renderImportList() {
@@ -1171,7 +1323,12 @@ function renderSheet() {
     lineNodes = []
     lineMetrics = []
     offsetCache = { width: 0, height: 0, focusShift: 0, max: 0 }
-    sheet.innerHTML = '<p class="empty">No essays found. Add an E01-....txt file next to this reader.</p>'
+    const message = folderNeedsGesture
+      ? 'Allow this folder to show its essays.'
+      : folderHandle
+        ? 'No .txt files in this folder.'
+        : 'No essays found. Add an E01-....txt file next to this reader.'
+    sheet.innerHTML = `<p class="empty">${message}</p>`
     void renderTakes()
     return
   }
@@ -1269,17 +1426,22 @@ function mount() {
         <aside class="sidebar" id="sidebar">
           <div class="side-head">
             <p class="side-label">Essays</p>
-            ${
-              import.meta.env.DEV
-                ? `<button class="tool reload" id="reload" type="button" aria-label="Reload essays">
-              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 12a9 9 0 1 1-2.6-6.3" />
-                <path d="M21 4v5h-5" />
-              </svg>
-            </button>`
-                : ''
-            }
+            <div class="side-tools">
+              <button class="tool reload" id="reload" type="button" aria-label="Reload essays" ${import.meta.env.DEV || folderHandle ? '' : 'hidden'}>
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 12a9 9 0 1 1-2.6-6.3" />
+                  <path d="M21 4v5h-5" />
+                </svg>
+              </button>
+              <button class="tool folder-pick" id="choose-folder" type="button">
+                ${FOLDER_ICON}
+                Folder
+              </button>
+            </div>
           </div>
+          <p id="folder-name" class="folder-name" ${folderName ? '' : 'hidden'}></p>
+          <p id="load-error" class="load-error" role="status" hidden></p>
+          <button class="folder-reset" id="use-app-essays" type="button" ${folderHandle ? '' : 'hidden'}>Use app essays</button>
           <ul id="essay-list"></ul>
           <div class="side-head imports-head">
             <p class="side-label" id="imports-label">My texts</p>
@@ -1332,8 +1494,15 @@ function mount() {
     </dialog>
   `
   document.querySelector('#reload')?.addEventListener('click', () => {
-    reloadEssays()
+    void reloadEssays()
   })
+  document.querySelector('#choose-folder')?.addEventListener('click', () => {
+    void chooseFolder()
+  })
+  document.querySelector('#use-app-essays')?.addEventListener('click', () => {
+    void useBundledEssays()
+  })
+  updateFolderChrome()
   document.querySelector('#theme').addEventListener('click', () => {
     setTheme(theme() === 'dark' ? 'light' : 'dark')
   })
@@ -1547,26 +1716,35 @@ bridge.escapeAttr = escapeAttr
 bridge.askConfirm = askConfirm
 
 readStorage(THEME_KEY)
-restoreEssay()
-void warmRecordingStore()
-document.documentElement.style.setProperty('--script-size', `${state.fontSize}px`)
-mount()
-void refreshAudioInputs()
-navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+async function start() {
+  try {
+    await adoptSavedFolder()
+  } catch {
+    if (folderHandle) folderNeedsGesture = true
+  }
+  restoreEssay()
+  void warmRecordingStore()
+  document.documentElement.style.setProperty('--script-size', `${state.fontSize}px`)
+  mount()
   void refreshAudioInputs()
-})
-
-if (document.fonts?.ready) {
-  document.fonts.ready.then(() => {
-    const saved = restoredAnchor || (anchor && { index: anchor.index, fraction: anchor.fraction })
-    restoredAnchor = null
-    measure()
-    if (saved && Number.isInteger(saved.index)) {
-      anchor = { index: saved.index, fraction: saved.fraction, width: -1, height: -1 }
-    }
-    applyOffset()
+  navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+    void refreshAudioInputs()
   })
+
+  if (document.fonts?.ready) {
+    document.fonts.ready.then(() => {
+      const saved = restoredAnchor || (anchor && { index: anchor.index, fraction: anchor.fraction })
+      restoredAnchor = null
+      measure()
+      if (saved && Number.isInteger(saved.index)) {
+        anchor = { index: saved.index, fraction: saved.fraction, width: -1, height: -1 }
+      }
+      applyOffset()
+    })
+  }
 }
+
+void start()
 
 function onPageLeave() {
   saveProgressNow()
