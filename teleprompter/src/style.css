@@ -89,6 +89,7 @@ textarea::placeholder { font: inherit; }
   display: grid;
   grid-template-rows: 54px minmax(0, 1fr);
   height: 100%;
+  overflow: hidden;
 }
 
 .topbar {
@@ -136,6 +137,7 @@ textarea::placeholder { font: inherit; }
 .body {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
+  height: 100%;
   min-height: 0;
 }
 
@@ -239,14 +241,25 @@ textarea::placeholder { font: inherit; }
 .backdrop { display: none; }
 
 .sheet {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   padding: 28px 32px 24px;
 }
 
 .head, .read { max-width: 960px; margin-left: auto; margin-right: auto; }
 
-.head { margin-bottom: 14px; }
+.head { flex: 0 0 auto; margin-bottom: 14px; }
+
+.read {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+}
 
 .kicker { margin: 0; color: var(--muted); font-size: 12px; letter-spacing: 0.04em; }
 
@@ -261,6 +274,7 @@ h1 {
 
 .transport {
   display: flex;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
@@ -269,6 +283,7 @@ h1 {
 
 .mic-row {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: flex-start;
   gap: 6px;
@@ -401,8 +416,9 @@ h1 {
 
 .stage {
   position: relative;
-  height: 62vh;
-  min-height: 220px;
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
   overflow: hidden;
   padding: 22px 28px;
   border: 1.5px solid var(--edge);
@@ -613,7 +629,7 @@ h1 {
   }
   .is-drawer .backdrop { opacity: 1; pointer-events: auto; }
   .sheet { padding: 18px 14px 28px; }
-  .stage { padding: 16px; height: 68vh; }
+  .stage { padding: 16px; }
 
   .search { max-width: none; }
 }
@@ -621,7 +637,9 @@ h1 {
 .stage-frame {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
 }
 
 .stage-frame:fullscreen,
@@ -1033,6 +1051,7 @@ html.is-reading-fullscreen .mic-row {
 
 .recorder-panel {
   display: grid;
+  flex: 0 0 auto;
   grid-template-rows: 0fr;
   margin: 0;
   transition: grid-template-rows 0.28s ease, margin-bottom 0.28s ease;
