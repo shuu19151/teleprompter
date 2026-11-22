@@ -851,7 +851,13 @@ html.is-reading-fullscreen .transport {
   user-select: none;
 }
 
-.recorder-ruler-track { position: absolute; inset: 0; }
+.recorder-ruler-track {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  overflow: visible;
+}
 
 .ruler-tick {
   position: absolute;

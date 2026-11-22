@@ -49,7 +49,10 @@ const PLAY_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="
 const CLOSE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>`
 const WAVE_STEP_MS = 40
 const RULER_STEP_MS = 400
-const PLAYHEAD_AT_MS = 3200
+const RULER_MAJOR_EVERY = 4
+// Major labels every 1.6s. 4.5 of them fit on each side of the playhead,
+// so 00:06.40 through 00:11.20 stay on screen when the head is at 00:04.80.
+const RULER_SIDE_MAJORS = 4.5
 const LEGACY_KEYS = {
   [THEME_KEY]: 'office-essay:theme',
   [SPEED_KEY]: 'office-essay:speed',
@@ -857,10 +860,11 @@ function exportPeaks() {
   return { peaks, origin }
 }
 
-/** x = centerX + (t - now) * pxPerSec. 3.2s still spans 66% of the width. */
+/** x = centerX + (t - now) * pxPerSec. The same scale is used for the ruler and the wave. */
 function timelineScale(width) {
   const centerX = width / 2
-  const pxPerSec = (width * 0.66) / (PLAYHEAD_AT_MS / 1000)
+  const majorSec = (RULER_STEP_MS * RULER_MAJOR_EVERY) / 1000
+  const pxPerSec = centerX / (RULER_SIDE_MAJORS * majorSec)
   return { centerX, pxPerSec }
 }
 
@@ -891,9 +895,10 @@ function fitCanvas(canvas) {
 function addRulerMark(track, index, pxPerSec) {
   const tMs = index * RULER_STEP_MS
   const x = (tMs / 1000) * pxPerSec
-  const major = index % 4 === 0
+  const major = index % RULER_MAJOR_EVERY === 0
   const tick = document.createElement('span')
   tick.className = major ? 'ruler-tick major' : 'ruler-tick minor'
+  tick.dataset.ms = String(tMs)
   tick.style.left = `${x}px`
   track.appendChild(tick)
   if (!major) return
@@ -906,18 +911,18 @@ function addRulerMark(track, index, pxPerSec) {
 }
 
 /**
- * Move one ruler track. Marks are created only when the scale or the set of
- * marks changes, never on every frame. Recording stops at `now`; playback
- * lays out the whole duration, including time still to the right of the head.
+ * Slide one ruler track. Marks are appended as the visible future grows,
+ * not rebuilt every frame. The track is wider than the panel so later marks
+ * are not clipped before the translate brings them on screen. Times before
+ * 00:00.00 are never created. The waveform, not the ruler, stops at the playhead.
  */
-function placeRuler(width, centerX, pxPerSec, nowSec, mode, durationSec) {
+function placeRuler(width, centerX, pxPerSec, nowSec) {
   const track = document.querySelector('#recorder-ruler-track')
   if (!track || width <= 0 || pxPerSec <= 0) return
-  const limit = mode === 'playback' ? Math.max(0, durationSec || 0) : Math.max(0, nowSec)
-  const key =
-    mode === 'playback'
-      ? `play:${Math.round(width)}:${Math.round(pxPerSec * 100)}:${Math.round(limit * 1000)}`
-      : `rec:${Math.round(width)}:${Math.round(pxPerSec * 100)}`
+  const ahead = width / 2 / pxPerSec
+  const majorSec = (RULER_STEP_MS * RULER_MAJOR_EVERY) / 1000
+  const limit = Math.max(0, nowSec) + ahead + majorSec
+  const key = `${Math.round(width)}:${Math.round(pxPerSec * 100)}`
   if (rulerBuilt.key !== key) {
     track.replaceChildren()
     rulerBuilt = { key, count: 0 }
@@ -927,6 +932,9 @@ function placeRuler(width, centerX, pxPerSec, nowSec, mode, durationSec) {
     addRulerMark(track, rulerBuilt.count, pxPerSec)
     rulerBuilt.count += 1
   }
+  const span = Math.max(width, ((last * RULER_STEP_MS) / 1000) * pxPerSec + 64)
+  const widthPx = `${Math.ceil(span)}px`
+  if (track.style.width !== widthPx) track.style.width = widthPx
   track.style.transform = `translateX(${centerX - nowSec * pxPerSec}px)`
 }
 
@@ -1022,7 +1030,7 @@ function paintRecording() {
   if (!canvas) return
   const width = canvas.clientWidth
   const { centerX, pxPerSec } = timelineScale(width)
-  placeRuler(width, centerX, pxPerSec, nowSec, 'recording')
+  placeRuler(width, centerX, pxPerSec, nowSec)
   drawRecordingWave(canvas, nowSec, centerX, pxPerSec)
 }
 
@@ -1061,7 +1069,7 @@ function paintPlayback(forcedTime) {
   const width = canvas.clientWidth
   const { centerX, pxPerSec } = timelineScale(width)
   const step = playback.peakStep > 0 ? playback.peakStep : duration > 0 && playback.peaks?.length ? duration / playback.peaks.length : WAVE_STEP_MS / 1000
-  placeRuler(width, centerX, pxPerSec, nowSec, 'playback', duration)
+  placeRuler(width, centerX, pxPerSec, nowSec)
   drawPlaybackWave(canvas, playback.peaks, playback.peakOrigin || 0, step, nowSec, centerX, pxPerSec)
 }
 
