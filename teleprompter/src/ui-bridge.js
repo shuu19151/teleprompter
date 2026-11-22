@@ -12,4 +12,5 @@ export const bridge = {
   askConfirm() {
     return Promise.resolve(false)
   },
+  showNotice() {},
 }

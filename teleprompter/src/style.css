@@ -603,6 +603,33 @@ h1 {
   line-height: 1.45;
 }
 
+.notice {
+  position: fixed;
+  z-index: 45;
+  left: 16px;
+  bottom: 16px;
+  max-width: min(320px, calc(100vw - 32px));
+  margin: 0;
+  padding: 8px 12px;
+  border: 1.5px solid var(--rust);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--rust) 14%, var(--card));
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+  box-shadow: 1.5px 2.5px 0 var(--edge);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.notice.is-in { opacity: 1; }
+
+.notice.is-out {
+  opacity: 0;
+  transition-duration: 0.7s;
+}
+
 @media (max-width: 900px) {
   .menu { display: inline-flex; align-items: center; }
   .body { display: block; }
@@ -695,7 +722,8 @@ html.is-reading-fullscreen .mic-row {
 @media (prefers-reduced-motion: reduce) {
   .line,
   .sidebar,
-  .recorder-panel {
+  .recorder-panel,
+  .notice {
     transition: none;
   }
 }

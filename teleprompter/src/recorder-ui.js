@@ -1151,7 +1151,7 @@ async function showTakeInFolder(take) {
   try {
     await revealTakeFile(take.diskPath)
   } catch {
-    showRecMessage(SHOW_TAKE_MESSAGE)
+    bridge.showNotice(SHOW_TAKE_MESSAGE)
   }
 }
 
