@@ -47,6 +47,7 @@ const STOP_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="
 const PAUSE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></svg>`
 const PLAY_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5.2v13.6l11-6.8z"/></svg>`
 const CLOSE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>`
+const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7.5 11.5 12 16l4.5-4.5"/><path d="M5 19h14"/></svg>`
 const WAVE_STEP_MS = 40
 const RULER_STEP_MS = 400
 const RULER_MAJOR_EVERY = 4
@@ -284,6 +285,8 @@ let importFileName = ''
 let importMarkdown = false
 let importReturnFocus = null
 let editingId = null
+let confirmResolver = null
+let confirmReturnFocus = null
 
 const state = {
   index: 0,
@@ -1141,7 +1144,13 @@ function syncPanelChrome() {
 function markActiveTake() {
   const id = panelMode === 'playback' ? playback?.take?.id : null
   for (const row of document.querySelectorAll('#takes-list [data-take-id]')) {
-    row.classList.toggle('is-on', id != null && row.dataset.takeId === String(id))
+    const on = id != null && row.dataset.takeId === String(id)
+    row.classList.toggle('is-on', on)
+    const select = row.querySelector('.take-select')
+    if (!select) continue
+    select.setAttribute('aria-pressed', on ? 'true' : 'false')
+    if (on) select.setAttribute('aria-current', 'true')
+    else select.removeAttribute('aria-current')
   }
 }
 
@@ -1334,16 +1343,19 @@ function renderTakeItem(take) {
   const name = takeFileName(take)
   const when = formatTakeWhen(take.createdAt)
   const iso = new Date(take.createdAt).toISOString()
+  const duration = formatTakeDuration(take.durationMs)
   const on = panelMode === 'playback' && playback?.take?.id === take.id
   return `
     <li class="take-row ${on ? 'is-on' : ''}" data-take-id="${take.id}">
-      <div class="take-meta">
-        <time datetime="${escapeAttr(iso)}">${escapeHtml(when)}</time>
-        <span class="take-duration">${formatTakeDuration(take.durationMs)}</span>
-      </div>
+      <button class="take-select" type="button" aria-pressed="${on ? 'true' : 'false'}" ${on ? 'aria-current="true"' : ''} aria-label="Select take from ${escapeAttr(when)}, ${escapeAttr(duration)}">
+        <span class="take-meta">
+          <time datetime="${escapeAttr(iso)}">${escapeHtml(when)}</time>
+          <span class="take-duration">${escapeHtml(duration)}</span>
+        </span>
+        <span class="take-select-gap" aria-hidden="true"></span>
+      </button>
       <div class="take-actions">
-        <button class="tool mini" type="button" data-take-play="${take.id}" aria-label="Play take from ${escapeAttr(when)}">Play</button>
-        <a class="tool mini take-download" href="${escapeAttr(url)}" download="${escapeAttr(name)}">Download</a>
+        <a class="tool mini take-download" href="${escapeAttr(url)}" download="${escapeAttr(name)}" aria-label="Download take" title="Download take">${DOWNLOAD_ICON}</a>
         <button class="tool mini danger" type="button" data-take-delete="${take.id}" aria-label="Delete take from ${escapeAttr(when)}">Delete</button>
       </div>
     </li>`
@@ -1560,8 +1572,31 @@ function onRecWithRunChange(event) {
   syncRecorderToRun()
 }
 
+function askConfirm({ title, message }) {
+  const dialog = document.querySelector('#confirm-dialog')
+  if (!dialog || dialog.open) return Promise.resolve(false)
+  const heading = dialog.querySelector('#confirm-heading')
+  const copy = dialog.querySelector('#confirm-copy')
+  if (heading) heading.textContent = title
+  if (copy) copy.textContent = message
+  confirmReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  return new Promise((resolve) => {
+    confirmResolver = resolve
+    dialog.showModal()
+    dialog.querySelector('#confirm-cancel')?.focus()
+  })
+}
+
 async function deleteShownTake(id) {
-  if (!window.confirm('Delete this take?')) return
+  const take = shownTakes.find((item) => item.id === id)
+  if (!take) return
+  const when = formatTakeWhen(take.createdAt)
+  const duration = formatTakeDuration(take.durationMs)
+  const accepted = await askConfirm({
+    title: 'Delete take?',
+    message: when ? `Delete the take from ${when} (${duration})?` : `Delete this take (${duration})?`,
+  })
+  if (!accepted) return
   try {
     await removeTake(id)
   } catch {
@@ -1591,9 +1626,10 @@ function onTakesClick(event) {
     if (Number.isInteger(id)) void deleteShownTake(id)
     return
   }
-  const play = event.target.closest('[data-take-play]')
-  if (!play) return
-  const id = Number(play.dataset.takePlay)
+  if (event.target.closest('.take-download')) return
+  const row = event.target.closest('.take-row')
+  if (!row) return
+  const id = Number(row.dataset.takeId)
   if (Number.isInteger(id)) void playShownTake(id)
 }
 
@@ -2010,10 +2046,14 @@ function updateImport(id, titleValue, bodyValue) {
   return { item: nextItem }
 }
 
-function deleteImport(id) {
+async function deleteImport(id) {
   const item = imports.find((entry) => entry.id === id)
   if (!item) return
-  if (!window.confirm(`Delete "${item.title}"?`)) return
+  const accepted = await askConfirm({
+    title: 'Delete text?',
+    message: `Delete "${item.title}"?`,
+  })
+  if (!accepted) return
   const next = imports.filter((entry) => entry.id !== id)
   const saved = writeImports(next)
   if (!saved.ok) {
@@ -2390,6 +2430,18 @@ function mount() {
         </div>
       </form>
     </dialog>
+    <dialog class="import-dialog confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-heading" aria-describedby="confirm-copy">
+      <div class="import-form">
+        <div class="import-head">
+          <h2 id="confirm-heading">Delete take?</h2>
+        </div>
+        <p class="confirm-copy" id="confirm-copy"></p>
+        <div class="dialog-actions">
+          <button class="btn" id="confirm-cancel" type="button">Cancel</button>
+          <button class="btn danger" id="confirm-delete" type="button">Delete</button>
+        </div>
+      </div>
+    </dialog>
   `
   document.querySelector('#reload')?.addEventListener('click', () => {
     reloadEssays()
@@ -2425,6 +2477,52 @@ function mount() {
     if (button) selectImport(button.dataset.importId)
   })
   document.querySelector('#takes-list')?.addEventListener('click', onTakesClick)
+  const confirmDialog = document.querySelector('#confirm-dialog')
+  const confirmCancel = confirmDialog.querySelector('#confirm-cancel')
+  const confirmDelete = confirmDialog.querySelector('#confirm-delete')
+  confirmDialog.addEventListener('close', () => {
+    const resolve = confirmResolver
+    confirmResolver = null
+    const back = confirmReturnFocus
+    confirmReturnFocus = null
+    resolve?.(false)
+    if (back?.isConnected) back.focus()
+  })
+  confirmDialog.addEventListener('click', (event) => {
+    if (event.target === confirmDialog) confirmDialog.close()
+  })
+  confirmDialog.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.stopPropagation()
+      return
+    }
+    if (event.key === 'Enter') {
+      if (event.target === confirmDelete) return
+      event.preventDefault()
+      if (event.target === confirmCancel) confirmDialog.close()
+      return
+    }
+    if (event.key !== 'Tab') return
+    const nodes = dialogFocusables(confirmDialog)
+    if (!nodes.length) return
+    const first = nodes[0]
+    const last = nodes[nodes.length - 1]
+    const active = document.activeElement
+    if (event.shiftKey && (active === first || !confirmDialog.contains(active))) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && (active === last || !confirmDialog.contains(active))) {
+      event.preventDefault()
+      first.focus()
+    }
+  })
+  confirmCancel.addEventListener('click', () => confirmDialog.close())
+  confirmDelete.addEventListener('click', () => {
+    const resolve = confirmResolver
+    confirmResolver = null
+    confirmDialog.close()
+    resolve?.(true)
+  })
   const dialog = document.querySelector('#import-dialog')
   const importForm = document.querySelector('#import-form')
   dialog.addEventListener('close', () => {
@@ -2595,7 +2693,7 @@ function isTypingTarget(target) {
 }
 
 document.addEventListener('keydown', (event) => {
-  if (document.querySelector('#import-dialog')?.open) return
+  if (document.querySelector('dialog[open]')) return
   const typing = isTypingTarget(event.target)
   if (event.key === 'Escape') {
     const frame = frameEl()
@@ -2604,6 +2702,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (event.key === ' ') {
     if (typing) return
+    if (event.target instanceof Element && event.target.closest('.take-select, .take-download, [data-take-delete]')) return
     event.preventDefault()
     if (!event.repeat) toggleRun()
     return
