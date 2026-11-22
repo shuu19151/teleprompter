@@ -12,7 +12,9 @@ import {
   takeFileName,
   waveformPeaks,
 } from './recording.js'
-import { saveTakeToDocuments } from './take-disk.js'
+import { inTauri } from './essay-folder.js'
+import { elementFromEvent, openRowMenu } from './row-menu.js'
+import { revealTakeFile, saveTakeToDocuments } from './take-disk.js'
 import { bridge } from './ui-bridge.js'
 
 const REC_WITH_RUN_KEY = 'teleprompter:recWithRun'
@@ -1135,6 +1137,60 @@ async function playShownTake(id) {
   if (capture.isActive()) await stopRecordingAndSave({ openAfter: false })
   const fresh = shownTakes.find((item) => item.id === id) || take
   await openPlayback(fresh)
+}
+
+const SHOW_TAKE_MESSAGE = 'Could not show that file.'
+
+function takeFromRow(row) {
+  const id = Number(row?.dataset.takeId)
+  if (!Number.isInteger(id)) return null
+  return shownTakes.find((item) => item.id === id) || null
+}
+
+function openTakeMenu(row, x, y, returnFocus) {
+  const take = takeFromRow(row)
+  if (!take) return
+  const items = [{ label: 'Play', onSelect: () => void playShownTake(take.id) }]
+  if (inTauri() && typeof take.diskPath === 'string' && take.diskPath) {
+    items.push({
+      label: 'Show in folder',
+      onSelect: () => void showTakeInFolder(take),
+    })
+  }
+  items.push({ label: 'Delete', danger: true, onSelect: () => void deleteShownTake(take.id) })
+  openRowMenu({
+    x,
+    y,
+    items,
+    returnFocus: returnFocus instanceof HTMLElement ? returnFocus : row,
+  })
+}
+
+async function showTakeInFolder(take) {
+  try {
+    await revealTakeFile(take.diskPath)
+  } catch {
+    showRecMessage(SHOW_TAKE_MESSAGE)
+  }
+}
+
+export function onTakesContextMenu(event) {
+  const source = elementFromEvent(event)
+  const row = source?.closest('.take-row')
+  if (!row) return
+  event.preventDefault()
+  openTakeMenu(row, event.clientX, event.clientY, source instanceof HTMLElement ? source : row)
+}
+
+export function onTakesMenuKey(event) {
+  if (event.key !== 'ContextMenu' && !(event.key === 'F10' && event.shiftKey)) return
+  const source = elementFromEvent(event)
+  const row = source?.closest('.take-row')
+  if (!row) return
+  event.preventDefault()
+  const anchor = source instanceof HTMLElement ? source : row
+  const rect = anchor.getBoundingClientRect()
+  openTakeMenu(row, rect.left, rect.bottom, anchor)
 }
 
 export function onTakesClick(event) {

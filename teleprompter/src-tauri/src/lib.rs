@@ -6,6 +6,7 @@ pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
+    .plugin(tauri_plugin_opener::init())
     // The page origin is http://tauri.localhost. Allowing the microphone here
     // answers getUserMedia before WebView2 draws its site permission prompt.
     // Recording still starts only when Rec calls getUserMedia.

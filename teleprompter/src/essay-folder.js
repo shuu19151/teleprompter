@@ -4,7 +4,8 @@
  * In a browser it keeps the File System Access directory handle.
  */
 import { open } from '@tauri-apps/plugin-dialog'
-import { readDir, readTextFile } from '@tauri-apps/plugin-fs'
+import { readDir, readTextFile, remove } from '@tauri-apps/plugin-fs'
+import { revealItemInDir } from '@tauri-apps/plugin-opener'
 
 const DB_NAME = 'teleprompter-folder'
 const DB_VERSION = 1
@@ -41,6 +42,33 @@ function joinPath(dir, name) {
 function isScopeError(error) {
   const message = String(error?.message || error).toLowerCase()
   return message.includes('forbidden') || message.includes('not allowed')
+}
+
+export function isFolderScopeError(error) {
+  return isScopeError(error)
+}
+
+function safeTxtName(name) {
+  return typeof name === 'string' && !/[\\/]/.test(name) && name !== '.' && name !== '..' && isTxtName(name)
+}
+
+export async function deleteEssayFile(folder, fileName) {
+  if (!safeTxtName(fileName)) throw new Error('Could not delete that essay.')
+  if (folder?.path) {
+    await remove(joinPath(folder.path, fileName))
+    return
+  }
+  if (!folder?.requestPermission || typeof folder.removeEntry !== 'function') {
+    throw new Error('Could not delete that essay.')
+  }
+  const status = await folder.requestPermission({ mode: 'readwrite' })
+  if (status !== 'granted') throw new Error('Could not delete that essay.')
+  await folder.removeEntry(fileName)
+}
+
+export async function revealEssayFile(folder, fileName) {
+  if (!folder?.path || !safeTxtName(fileName)) throw new Error('Could not show that file.')
+  await revealItemInDir(joinPath(folder.path, fileName))
 }
 
 function openDb() {

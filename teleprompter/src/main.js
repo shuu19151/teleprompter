@@ -8,15 +8,19 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isEssayFile } from './essay-files.js'
 import {
   clearSavedFolder,
+  deleteEssayFile,
   folderPermission,
   folderPickerSupported,
   inTauri,
+  isFolderScopeError,
   loadSavedFolder,
   pickEssayFolder,
   readEssayFiles,
   requestFolderPermission,
+  revealEssayFile,
   saveFolderHandle,
 } from './essay-folder.js'
+import { elementFromEvent, openRowMenu } from './row-menu.js'
 import {
   clampTitle,
   EMPTY_IMPORT_MESSAGE,
@@ -45,6 +49,8 @@ import {
   onMicChange,
   onRecWithRunChange,
   onTakesClick,
+  onTakesContextMenu,
+  onTakesMenuKey,
   onVoiceEnhanceChange,
   paintPlayback,
   paintRecording,
@@ -848,6 +854,114 @@ async function chooseFolder() {
   }
 }
 
+function openEssayMenu(button, x, y) {
+  const index = Number(button.dataset.index)
+  const essay = Number.isInteger(index) ? essays[index] : null
+  if (!essay) return
+  const items = [{ label: 'Open', onSelect: () => select(index) }]
+  if (folderHandle?.path && inTauri()) {
+    items.push({
+      label: 'Show in folder',
+      onSelect: () => {
+        void showEssayInFolder(essay)
+      },
+    })
+  }
+  if (folderHandle) {
+    items.push({
+      label: 'Delete',
+      danger: true,
+      onSelect: () => {
+        void deleteShownEssay(essay)
+      },
+    })
+  }
+  openRowMenu({ x, y, items, returnFocus: button })
+}
+
+async function showEssayInFolder(essay) {
+  try {
+    await revealEssayFile(folderHandle, essay.file)
+  } catch {
+    setLoadError('Could not show that file.')
+  }
+}
+
+async function deleteShownEssay(essay) {
+  if (!folderHandle || !essay) return
+  const label = [essay.code, essay.title].filter(Boolean).join(' ')
+  const accepted = await askConfirm({
+    title: 'Delete essay?',
+    message: label
+      ? `Delete "${label}"? This removes the .txt file from the folder.`
+      : 'Delete this .txt file from the folder?',
+  })
+  if (!accepted || !folderHandle) return
+  try {
+    await deleteEssayFile(folderHandle, essay.file)
+  } catch (error) {
+    if (isFolderScopeError(error)) {
+      folderNeedsGesture = true
+      updateFolderChrome()
+      return
+    }
+    setLoadError('Could not delete that essay.')
+    return
+  }
+  setLoadError('')
+  try {
+    applyEssayList(await essaysFromHandle(folderHandle))
+  } catch {
+    setLoadError('Could not read that folder.')
+  }
+}
+
+function onEssayContextMenu(event) {
+  const button = elementFromEvent(event)?.closest('.essay')
+  if (!button) return
+  event.preventDefault()
+  openEssayMenu(button, event.clientX, event.clientY)
+}
+
+function openImportMenu(button, x, y) {
+  const id = button.dataset.importId
+  if (!id || !imports.some((item) => item.id === id)) return
+  openRowMenu({
+    x,
+    y,
+    items: [
+      { label: 'Edit', onSelect: () => openEditDialog(id) },
+      { label: 'Delete', danger: true, onSelect: () => deleteImport(id) },
+    ],
+    returnFocus: button,
+  })
+}
+
+function onImportContextMenu(event) {
+  const button = elementFromEvent(event)?.closest('[data-import-id]')
+  if (!button) return
+  event.preventDefault()
+  openImportMenu(button, event.clientX, event.clientY)
+}
+
+function onImportMenuKey(event) {
+  if (event.key !== 'ContextMenu' && !(event.key === 'F10' && event.shiftKey)) return
+  const button = elementFromEvent(event)?.closest('[data-import-id]')
+  if (!button) return
+  event.preventDefault()
+  const rect = button.getBoundingClientRect()
+  openImportMenu(button, rect.left, rect.bottom)
+}
+
+function onEssayMenuKey(event) {
+  if (event.key !== 'ContextMenu' && !(event.key === 'F10' && event.shiftKey)) return
+  const button = elementFromEvent(event)?.closest('.essay')
+  if (!button) return
+  event.preventDefault()
+  const rect = button.getBoundingClientRect()
+  openEssayMenu(button, rect.left, rect.bottom)
+}
+
 async function useBundledEssays() {
   let forgetError = false
   try {
@@ -948,15 +1062,11 @@ function renderImportList() {
     .map(({ item, reading }) => {
       const on = state.kind === 'import' && state.importId === item.id
       return `
-        <li class="import-row">
+        <li>
           <button class="essay ${on ? 'is-on' : ''}" type="button" data-import-id="${escapeAttr(item.id)}">
             <span class="code">${escapeHtml(reading.code)}</span>
             <span class="name">${escapeHtml(item.title)}</span>
           </button>
-          <div class="import-tools">
-            <button class="tool mini" type="button" data-edit="${escapeAttr(item.id)}" aria-label="Edit ${escapeAttr(item.title)}">Edit</button>
-            <button class="tool mini danger" type="button" data-delete="${escapeAttr(item.id)}" aria-label="Delete ${escapeAttr(item.title)}">Delete</button>
-          </div>
         </li>`
     })
     .join('')
@@ -1459,7 +1569,7 @@ function mount() {
           <ul id="essay-list"></ul>
           <div class="side-head imports-head">
             <p class="side-label" id="imports-label">My texts</p>
-            <button class="tool" id="import-open" type="button">Import</button>
+            <button class="tool folder-pick" id="import-open" type="button">Import</button>
           </div>
           <p id="import-note" class="load-error" role="status" hidden></p>
           <ul id="import-list" aria-labelledby="imports-label"></ul>
@@ -1526,28 +1636,26 @@ function mount() {
   document.querySelector('#backdrop').addEventListener('click', () => {
     setDrawer(false)
   })
-  document.querySelector('#essay-list').addEventListener('click', (event) => {
+  const essayList = document.querySelector('#essay-list')
+  essayList.addEventListener('click', (event) => {
     const button = event.target.closest('.essay')
     if (!button) return
     select(Number(button.dataset.index))
   })
+  essayList.addEventListener('contextmenu', onEssayContextMenu)
+  essayList.addEventListener('keydown', onEssayMenuKey)
   document.querySelector('#import-open').addEventListener('click', openImportDialog)
   const importList = document.querySelector('#import-list')
   importList.addEventListener('click', (event) => {
-    const edit = event.target.closest('[data-edit]')
-    if (edit) {
-      openEditDialog(edit.dataset.edit)
-      return
-    }
-    const del = event.target.closest('[data-delete]')
-    if (del) {
-      deleteImport(del.dataset.delete)
-      return
-    }
     const button = event.target.closest('[data-import-id]')
     if (button) selectImport(button.dataset.importId)
   })
-  document.querySelector('#takes-list')?.addEventListener('click', onTakesClick)
+  importList.addEventListener('contextmenu', onImportContextMenu)
+  importList.addEventListener('keydown', onImportMenuKey)
+  const takesList = document.querySelector('#takes-list')
+  takesList?.addEventListener('click', onTakesClick)
+  takesList?.addEventListener('contextmenu', onTakesContextMenu)
+  takesList?.addEventListener('keydown', onTakesMenuKey)
   const confirmDialog = document.querySelector('#confirm-dialog')
   const confirmCancel = confirmDialog.querySelector('#confirm-cancel')
   const confirmDelete = confirmDialog.querySelector('#confirm-delete')
@@ -1799,6 +1907,7 @@ function isTypingTarget(target) {
 
 document.addEventListener('keydown', (event) => {
   if (document.querySelector('dialog[open]')) return
+  if (event.target instanceof Element && event.target.closest('.row-menu')) return
   const typing = isTypingTarget(event.target)
   if (event.key === 'Escape') {
     const frame = frameEl()

@@ -1,4 +1,5 @@
 import { documentDir, join } from '@tauri-apps/api/path'
+import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { BaseDirectory, exists, mkdir, writeFile } from '@tauri-apps/plugin-fs'
 import { inTauri } from './essay-folder.js'
 import { takeFileName } from './recording.js'
@@ -10,6 +11,22 @@ function splitName(name) {
   const dot = name.lastIndexOf('.')
   if (dot <= 0) return { stem: name, ext: '' }
   return { stem: name.slice(0, dot), ext: name.slice(dot) }
+}
+
+function canonical(path) {
+  return String(path).replace(/[\\/]+/g, '/').replace(/\/+$/, '')
+}
+
+function isDirectChild(root, filePath) {
+  const rootPath = canonical(root)
+  const file = canonical(filePath)
+  const prefix = `${rootPath}/`
+  const windows = String(root).includes('\\') || String(filePath).includes('\\')
+  const prefixCmp = windows ? prefix.toLowerCase() : prefix
+  const fileCmp = windows ? file.toLowerCase() : file
+  if (!fileCmp.startsWith(prefixCmp)) return false
+  const name = file.slice(prefix.length)
+  return name.length > 0 && !name.includes('/') && name !== '.' && name !== '..'
 }
 
 async function documentsTakeDir() {
@@ -45,4 +62,11 @@ export async function saveTakeToDocuments(take) {
   } catch {
     return undefined
   }
+}
+
+export async function revealTakeFile(diskPath) {
+  if (!inTauri()) return
+  const root = await documentsTakeDir()
+  if (!isDirectChild(root, diskPath)) throw new Error('Could not show that file.')
+  await revealItemInDir(diskPath)
 }

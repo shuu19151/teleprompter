@@ -684,25 +684,6 @@ html.is-reading-fullscreen .mic-row {
 
 .imports-head { margin-top: 22px; }
 
-.import-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 6px;
-  align-items: stretch;
-}
-
-.import-row .essay { min-width: 0; }
-
-.import-row .name {
-  overflow-wrap: anywhere;
-}
-
-.import-tools {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
 .mini {
   height: 28px;
   padding: 0 8px;
@@ -717,6 +698,45 @@ html.is-reading-fullscreen .mic-row {
 .danger:focus-visible {
   background: var(--danger);
   border-color: var(--danger);
+  color: var(--card);
+}
+
+.row-menu {
+  position: fixed;
+  z-index: 50;
+  display: grid;
+  min-width: 168px;
+  margin: 0;
+  padding: 4px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--card);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--ink) 18%, transparent);
+  user-select: none;
+}
+
+.row-menu-item {
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.row-menu-item:hover,
+.row-menu-item:focus-visible {
+  outline: none;
+  background: var(--paper-2);
+}
+
+.row-menu-item.danger:hover,
+.row-menu-item.danger:focus-visible {
+  background: var(--danger);
   color: var(--card);
 }
 
