@@ -31,7 +31,7 @@ The reload button next to Essays calls `/api/essays`. That route exists only on 
 
 ## Your own text
 
-Import, in the sidebar under My texts, opens a dialog where you can type a title, paste a script, or choose a `.txt` or `.md` file. The file is read as UTF-8. You can also drop a `.txt` or `.md` file anywhere on the window.
+Import, in the sidebar under My texts, opens a dialog where you can type a title, paste a script, or choose a `.txt` or `.md` file. The title and text fields, including their placeholders, use the same Literata stack as the script. The small labels and the dialog buttons stay in JetBrains Mono. The file is read as UTF-8. You can also drop a `.txt` or `.md` file anywhere on the window.
 
 Imported text is split the same way as a bundled essay. The first block, up to a blank line, is the title, and the rest is the script. A title you type replaces that block. If there is no blank line, a pasted text uses its first line as the title, and a file uses its file name; either way the text stays on the stage. For Markdown, a leading `#` heading mark on a line is removed and the line is kept as text. Empty text is rejected, and anything over 200 KB is rejected. Both messages appear in the dialog.
 
