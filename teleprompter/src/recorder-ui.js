@@ -9,7 +9,6 @@ import {
   micAudioConstraints,
   removeTake,
   sampleLevel,
-  takeFileName,
   waveformPeaks,
 } from './recording.js'
 import { inTauri } from './essay-folder.js'
@@ -32,8 +31,6 @@ const STOP_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="
 const PAUSE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></svg>`
 const PLAY_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5.2v13.6l11-6.8z"/></svg>`
 const CLOSE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>`
-const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7.5 11.5 12 16l4.5-4.5"/><path d="M5 19h14"/></svg>`
-
 function readStorage(key) {
   try {
     return localStorage.getItem(key)
@@ -93,7 +90,6 @@ let seeking = false
 let seekAnchor = null
 let playback = null
 let shownTakes = []
-const takeUrls = new Set()
 let colorCache = { theme: '', ink: '', line: '' }
 const capture = createCapture({
   onError() {
@@ -151,11 +147,6 @@ export function syncRecUi() {
     button.setAttribute('aria-label', label)
   }
   if (panelMode === 'recording') syncPanelChrome()
-}
-
-function revokeTakeUrls() {
-  for (const url of takeUrls) URL.revokeObjectURL(url)
-  takeUrls.clear()
 }
 
 function formatTakeWhen(ms) {
@@ -875,26 +866,18 @@ export function togglePlayback() {
 }
 
 function renderTakeItem(take) {
-  const url = URL.createObjectURL(take.blob)
-  takeUrls.add(url)
-  const name = takeFileName(take)
   const when = formatTakeWhen(take.createdAt)
   const iso = takeDateIso(take.createdAt)
   const duration = formatTakeDuration(take.durationMs)
   const on = panelMode === 'playback' && playback?.take?.id === take.id
   return `
     <li class="take-row ${on ? 'is-on' : ''}" data-take-id="${take.id}">
-      <button class="take-select" type="button" aria-pressed="${on ? 'true' : 'false'}" ${on ? 'aria-current="true"' : ''} aria-label="Select take from ${bridge.escapeAttr(when)}, ${bridge.escapeAttr(duration)}">
+      <button class="take-select" type="button" aria-pressed="${on ? 'true' : 'false'}" ${on ? 'aria-current="true"' : ''} aria-label="Play take from ${bridge.escapeAttr(when)}, ${bridge.escapeAttr(duration)}">
         <span class="take-meta">
           <time${iso ? ` datetime="${bridge.escapeAttr(iso)}"` : ''}>${bridge.escapeHtml(when)}</time>
           <span class="take-duration">${bridge.escapeHtml(duration)}</span>
         </span>
-        <span class="take-select-gap" aria-hidden="true"></span>
       </button>
-      <div class="take-actions">
-        <a class="tool mini take-download" href="${bridge.escapeAttr(url)}" download="${bridge.escapeAttr(name)}" aria-label="Download take" title="Download take">${DOWNLOAD_ICON}</a>
-        <button class="tool mini danger" type="button" data-take-delete="${take.id}" aria-label="Delete take from ${bridge.escapeAttr(when)}">Delete</button>
-      </div>
     </li>`
 }
 
@@ -908,14 +891,12 @@ export async function renderTakes() {
     takes = key ? await listTakes(key) : []
   } catch {
     if (token !== takesToken || !list.isConnected) return
-    revokeTakeUrls()
     shownTakes = []
     list.innerHTML = '<li class="empty">Could not load takes.</li>'
     return
   }
   if (token !== takesToken || !list.isConnected || takeTextKey(bridge.current()) !== key) return
   try {
-    revokeTakeUrls()
     takes.sort((a, b) => b.createdAt - a.createdAt)
     shownTakes = takes
     if (!takes.length) {
@@ -1194,13 +1175,6 @@ export function onTakesMenuKey(event) {
 }
 
 export function onTakesClick(event) {
-  const del = event.target.closest('[data-take-delete]')
-  if (del) {
-    const id = Number(del.dataset.takeDelete)
-    if (Number.isInteger(id)) void deleteShownTake(id)
-    return
-  }
-  if (event.target.closest('.take-download')) return
   const row = event.target.closest('.take-row')
   if (!row) return
   const id = Number(row.dataset.takeId)

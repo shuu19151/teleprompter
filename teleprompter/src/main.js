@@ -1916,7 +1916,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (event.key === ' ') {
     if (typing) return
-    if (event.target instanceof Element && event.target.closest('.take-select, .take-download, [data-take-delete]')) return
+    if (event.target instanceof Element && event.target.closest('.take-select')) return
     event.preventDefault()
     if (!event.repeat) toggleRun()
     return

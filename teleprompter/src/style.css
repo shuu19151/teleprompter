@@ -684,12 +684,6 @@ html.is-reading-fullscreen .mic-row {
 
 .imports-head { margin-top: 22px; }
 
-.mini {
-  height: 28px;
-  padding: 0 8px;
-  font-size: 11px;
-}
-
 .danger {
   color: var(--danger);
   border-color: color-mix(in srgb, var(--danger) 45%, transparent);
@@ -1004,11 +998,6 @@ html.is-reading-fullscreen .mic-row {
   outline: none;
 }
 
-.take-select-gap {
-  display: block;
-  height: 28px;
-}
-
 .take-row:has(.take-select:focus-visible) {
   outline: 2px solid var(--rust);
   outline-offset: 2px;
@@ -1040,36 +1029,6 @@ html.is-reading-fullscreen .mic-row {
   color: var(--ink);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-}
-
-.take-actions {
-  grid-area: 1 / 1;
-  align-self: end;
-  z-index: 1;
-  display: flex;
-  flex-wrap: nowrap;
-  gap: 4px;
-  margin: 0 8px 8px;
-  pointer-events: none;
-}
-
-.take-actions > .tool {
-  pointer-events: auto;
-}
-
-a.take-download,
-a.take-download:hover,
-a.take-download:focus,
-a.take-download:active,
-a.take-download:visited {
-  display: inline-grid;
-  place-items: center;
-  box-sizing: border-box;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  color: var(--ink);
-  text-decoration: none;
 }
 
 .recorder-panel {
@@ -1234,8 +1193,6 @@ a.take-download:visited {
 
 .rec:focus-visible,
 .rec-with-run input:focus-visible,
-.take-download:focus-visible,
-.take-row .tool:focus-visible,
 .icon-btn:focus-visible {
   outline: 2px solid var(--rust);
   outline-offset: 2px;
