@@ -10,6 +10,7 @@
   --ink-2: #34302b;
   --muted: #6f6961;
   --rust: #d0683a;
+  --danger: #b3261e;
   --green-tile: #e8efd9;
   --radius: 12px;
   --font: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -29,6 +30,7 @@
   --ink: #efe6d6;
   --ink-2: #ddd3c2;
   --muted: #a3998b;
+  --danger: #f2766b;
   --rust: #e8834d;
   --green-tile: #2a3324;
   color-scheme: dark;
@@ -123,15 +125,16 @@ textarea::placeholder { font: inherit; }
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin: 0 8px 10px;
+  margin: 0 0 10px;
 }
 
 .side-label {
   margin: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 14px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  padding-left: 8px;
 }
 
 .reload {
@@ -496,6 +499,17 @@ html.is-reading-fullscreen .transport {
   font-size: 11px;
 }
 
+.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+.danger:hover,
+.danger:focus-visible {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--card);
+}
+
 .import-dialog {
   width: min(480px, calc(100vw - 32px));
   max-height: min(640px, calc(100vh - 48px));
@@ -558,7 +572,7 @@ html.is-reading-fullscreen .transport {
 .import-form textarea,
 .import-form input[type="text"]::placeholder,
 .import-form textarea::placeholder {
-  font-family: var(--serif);
+  font-family: var(--font);
   font-size: 14px;
   font-weight: 400;
   line-height: 1.45;

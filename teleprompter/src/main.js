@@ -835,7 +835,7 @@ function renderImportList() {
           </button>
           <div class="import-tools">
             <button class="tool mini" type="button" data-edit="${escapeAttr(item.id)}" aria-label="Edit ${escapeAttr(item.title)}">Edit</button>
-            <button class="tool mini" type="button" data-delete="${escapeAttr(item.id)}" aria-label="Delete ${escapeAttr(item.title)}">Delete</button>
+            <button class="tool mini danger" type="button" data-delete="${escapeAttr(item.id)}" aria-label="Delete ${escapeAttr(item.title)}">Delete</button>
           </div>
         </li>`
     })
@@ -1281,7 +1281,6 @@ function mount() {
       <form class="import-form" id="import-form">
         <div class="import-head">
           <h2 id="import-heading">Import text</h2>
-          <button class="tool mini" id="import-close" type="button" aria-label="Close">Close</button>
         </div>
         <label class="field">Title
           <input id="import-name" type="text" maxlength="180" autocomplete="off" placeholder="Leave blank to use the first line" />
@@ -1370,7 +1369,6 @@ function mount() {
       first.focus()
     }
   })
-  document.querySelector('#import-close').addEventListener('click', () => dialog.close())
   document.querySelector('#import-cancel').addEventListener('click', () => dialog.close())
   importForm.addEventListener('submit', (event) => {
     event.preventDefault()
