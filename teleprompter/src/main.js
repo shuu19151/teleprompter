@@ -10,11 +10,14 @@ import {
   createCapture,
   describeMediaError,
   formatClock,
+  formatFine,
   isQuotaError as isIdbQuotaError,
   listTakes,
   removeTake,
+  sampleLevel,
   takeFileName,
   warmRecordingStore,
+  waveformPeaks,
 } from './recording.js'
 
 const THEME_KEY = 'teleprompter:theme'
@@ -40,6 +43,13 @@ const READ_IMPORT_MESSAGE = 'Could not read that file.'
 const QUOTA_IMPORT_MESSAGE = 'Could not save this text because browser storage is full.'
 const ENTER_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4H4v4"/><path d="M16 4h4v4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/></svg>`
 const EXIT_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v5H4"/><path d="M15 4v5h5"/><path d="M4 15h5v5"/><path d="M20 15h-5v5"/></svg>`
+const STOP_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="1.5" fill="currentColor"/></svg>`
+const PAUSE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></svg>`
+const PLAY_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5.2v13.6l11-6.8z"/></svg>`
+const CLOSE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>`
+const WAVE_STEP_MS = 40
+const RULER_STEP_MS = 400
+const PLAYHEAD_AT_MS = 3200
 const LEGACY_KEYS = {
   [THEME_KEY]: 'office-essay:theme',
   [SPEED_KEY]: 'office-essay:speed',
@@ -299,9 +309,23 @@ let recWithRun = loadRecWithRun()
 let recordingMeta = null
 let saveTask = null
 let pendingCommit = null
-let recTimer = 0
 let takesToken = 0
+let panelMode = 'closed'
+let micLabel = 'Microphone'
+let manualHold = false
+let openAfterSave = true
+let audioCtx = null
+let analyser = null
+let waveSource = null
+let waveMute = null
+let wavePeaks = []
+let waveGen = 0
+let playGen = 0
+let seeking = false
+let playback = null
+let shownTakes = []
 const takeUrls = new Set()
+let colorCache = { theme: '', ink: '', line: '' }
 const capture = createCapture({
   onError() {
     showRecMessage('Recording stopped because the microphone failed.')
@@ -648,16 +672,19 @@ function toggleRun() {
 }
 
 // With "Start scrolling with recording" on, MediaRecorder pauses and resumes
-// with Run. With it off, a recorder paused by that option keeps capturing.
+// with Run. With it off, scrolling leaves the recorder alone, except a pause
+// the reader started from the panel (manualHold) stays paused.
 function syncRecorderToRun() {
   if (capture.phase !== 'recording' && capture.phase !== 'paused') return
   if (!recWithRun) {
-    capture.resume()
+    if (!manualHold) capture.resume()
     syncRecUi()
     return
   }
-  if (state.running) capture.resume()
-  else capture.pause()
+  if (state.running) {
+    manualHold = false
+    capture.resume()
+  } else capture.pause()
   syncRecUi()
 }
 
@@ -686,32 +713,13 @@ function syncRecUi() {
   const live = capture.phase === 'recording' || capture.phase === 'paused'
   const paused = capture.phase === 'paused'
   const label = live ? (paused ? 'Stop recording, paused' : 'Stop recording') : 'Start recording'
-  const clock = formatClock(capture.elapsedMs())
   for (const button of document.querySelectorAll('#rec, #rec-stage')) {
     button.setAttribute('aria-pressed', live ? 'true' : 'false')
     button.classList.toggle('is-recording', live)
     button.classList.toggle('is-paused', paused)
     button.setAttribute('aria-label', label)
-    const time = button.querySelector('[data-rec-time]')
-    if (!time) continue
-    time.hidden = !live
-    if (live) time.textContent = clock
   }
-}
-
-function stopRecTimer() {
-  clearInterval(recTimer)
-  recTimer = 0
-}
-
-function startRecTimer() {
-  stopRecTimer()
-  const paint = () => {
-    const text = formatClock(capture.elapsedMs())
-    for (const el of document.querySelectorAll('[data-rec-time]')) el.textContent = text
-  }
-  paint()
-  recTimer = window.setInterval(paint, 200)
+  if (panelMode === 'recording') syncPanelChrome()
 }
 
 function revokeTakeUrls() {
@@ -729,60 +737,580 @@ function formatTakeDuration(ms) {
   return formatClock(ms)
 }
 
+function themeColors() {
+  const theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'
+  if (colorCache.theme === theme && colorCache.ink) return colorCache
+  const style = getComputedStyle(document.documentElement)
+  colorCache = {
+    theme,
+    ink: style.getPropertyValue('--ink').trim() || '#1d1b18',
+    line: style.getPropertyValue('--line-strong').trim() || '#c6bbac',
+  }
+  return colorCache
+}
+
+function closeAudioGraph() {
+  try {
+    waveSource?.disconnect()
+  } catch {
+    /* already disconnected */
+  }
+  try {
+    analyser?.disconnect()
+  } catch {
+    /* already disconnected */
+  }
+  try {
+    waveMute?.disconnect()
+  } catch {
+    /* already disconnected */
+  }
+  waveSource = null
+  analyser = null
+  waveMute = null
+  const ctx = audioCtx
+  audioCtx = null
+  if (ctx && ctx.state !== 'closed') ctx.close().catch(() => {})
+}
+
+function ensureAudioContext() {
+  const Ctx = window.AudioContext || window.webkitAudioContext
+  if (!Ctx) return null
+  if (!audioCtx || audioCtx.state === 'closed') audioCtx = new Ctx()
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {})
+  return audioCtx
+}
+
+function attachAnalyser(stream) {
+  const ctx = ensureAudioContext()
+  if (!ctx || !stream) return
+  try {
+    waveSource?.disconnect()
+  } catch {
+    /* ignore */
+  }
+  analyser = ctx.createAnalyser()
+  analyser.fftSize = 1024
+  analyser.smoothingTimeConstant = 0.2
+  waveSource = ctx.createMediaStreamSource(stream)
+  waveSource.connect(analyser)
+  // A silent tap keeps the analyser pulling samples. Nothing is heard.
+  waveMute = ctx.createGain()
+  waveMute.gain.value = 0
+  analyser.connect(waveMute)
+  waveMute.connect(ctx.destination)
+}
+
+async function readMicLabel(stream) {
+  const track = stream?.getAudioTracks?.()[0]
+  if (!track) return 'Microphone'
+  const fallback = track.label || 'Microphone'
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices()
+    const id = track.getSettings?.().deviceId
+    const match = devices.find((device) => device.kind === 'audioinput' && id && device.deviceId === id)
+    return match?.label || fallback
+  } catch {
+    return fallback
+  }
+}
+
+function waveMetrics(width, elapsedSec) {
+  const playheadX = Math.max(48, Math.min(width - 16, width * 0.66))
+  const pxPerSec = playheadX / (PLAYHEAD_AT_MS / 1000)
+  const scroll = Math.max(0, elapsedSec * pxPerSec - playheadX)
+  return { playheadX, pxPerSec, scroll }
+}
+
+function fitCanvas(canvas) {
+  const width = canvas.clientWidth
+  const height = canvas.clientHeight
+  if (width < 2 || height < 2) return null
+  const dpr = Math.min(window.devicePixelRatio || 1, 2.5)
+  const bitmapW = Math.round(width * dpr)
+  const bitmapH = Math.round(height * dpr)
+  if (canvas.width !== bitmapW || canvas.height !== bitmapH) {
+    canvas.width = bitmapW
+    canvas.height = bitmapH
+  }
+  const ctx = canvas.getContext('2d')
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  return { ctx, width, height }
+}
+
+function rulerLabelStyle(x, width) {
+  const shift = x < 34 ? 0 : x > width - 34 ? -100 : -50
+  return `left:${x.toFixed(1)}px;transform:translateX(${shift}%)`
+}
+
+function paintRuler(width, elapsedMs) {
+  const track = document.querySelector('#recorder-ruler-track')
+  if (!track || width <= 0) return null
+  const elapsed = Math.max(0, elapsedMs / 1000)
+  const metrics = waveMetrics(width, elapsed)
+  const startMs = (metrics.scroll / metrics.pxPerSec) * 1000
+  const endMs = ((metrics.scroll + width) / metrics.pxPerSec) * 1000
+  const first = Math.floor(startMs / RULER_STEP_MS) - 1
+  const last = Math.ceil(endMs / RULER_STEP_MS) + 1
+  let html = ''
+  const labels = []
+  for (let index = first; index <= last; index += 1) {
+    if (index < 0) continue
+    const tMs = index * RULER_STEP_MS
+    const x = (tMs / 1000) * metrics.pxPerSec - metrics.scroll
+    if (x < -48 || x > width + 48) continue
+    const major = index % 4 === 0
+    html += `<span class="ruler-tick ${major ? 'major' : 'minor'}" style="left:${x.toFixed(1)}px"></span>`
+    if (major) {
+      const text = formatFine(tMs)
+      labels.push(text)
+      html += `<span class="ruler-label" style="${rulerLabelStyle(x, width)}">${text}</span>`
+    }
+  }
+  track.innerHTML = html
+  track.dataset.labels = labels.join(' ')
+  return metrics
+}
+
+function paintPlaybackRuler(width, durationMs) {
+  const track = document.querySelector('#recorder-ruler-track')
+  if (!track || width <= 0) return
+  const duration = Math.max(durationMs, RULER_STEP_MS)
+  const pxPerMs = width / duration
+  const targetPx = 88
+  const candidates = [400, 800, 1600, 3200, 8000, 16000, 30000, 60000]
+  const majorMs = candidates.find((step) => step * pxPerMs >= targetPx) || 60000
+  const minorMs = majorMs / 4
+  let html = ''
+  const labels = []
+  for (let tMs = 0; tMs <= duration + 1; tMs += minorMs) {
+    const x = tMs * pxPerMs
+    if (x > width + 8) break
+    const major = Math.round(tMs / minorMs) % 4 === 0
+    html += `<span class="ruler-tick ${major ? 'major' : 'minor'}" style="left:${x.toFixed(1)}px"></span>`
+    if (major) {
+      const text = formatFine(tMs)
+      labels.push(text)
+      html += `<span class="ruler-label" style="${rulerLabelStyle(x, width)}">${text}</span>`
+    }
+  }
+  track.innerHTML = html
+  track.dataset.labels = labels.join(' ')
+}
+
+function drawBaseline(ctx, width, height, color) {
+  const mid = height / 2
+  ctx.fillStyle = color
+  ctx.fillRect(0, mid - 0.5, width, 1)
+}
+
+function barHeight(level, height) {
+  const shaped = Math.sqrt(Math.min(1, Math.max(0, level || 0)))
+  if (shaped < 0.05) return 0
+  return Math.max(2, shaped * (height - 6))
+}
+
+function drawLiveWave(canvas, peaks, metrics) {
+  const view = fitCanvas(canvas)
+  if (!view || !metrics) return
+  const { ctx, width, height } = view
+  const colors = themeColors()
+  ctx.clearRect(0, 0, width, height)
+  drawBaseline(ctx, width, height, colors.line)
+  ctx.fillStyle = colors.ink
+  const mid = height / 2
+  const { pxPerSec, scroll, playheadX } = metrics
+  for (let i = 0; i < peaks.length; i += 1) {
+    const t = ((i + 1) * WAVE_STEP_MS) / 1000
+    const x = t * pxPerSec - scroll
+    if (x < -3 || x > playheadX + 1) continue
+    const bar = barHeight(peaks[i], height)
+    if (bar <= 0) continue
+    ctx.fillRect(Math.round(x) - 1, mid - bar / 2, 3, bar)
+  }
+}
+
+function drawPlaybackWave(canvas, peaks, ratio) {
+  const view = fitCanvas(canvas)
+  if (!view) return
+  const { ctx, width, height } = view
+  const colors = themeColors()
+  ctx.clearRect(0, 0, width, height)
+  drawBaseline(ctx, width, height, colors.line)
+  ctx.fillStyle = colors.ink
+  const data = peaks && peaks.length ? peaks : new Float32Array(48)
+  const slot = width / data.length
+  const barW = Math.max(1, Math.min(3, slot * 0.55))
+  const mid = height / 2
+  for (let i = 0; i < data.length; i += 1) {
+    const bar = barHeight(data[i], height)
+    if (bar <= 0) continue
+    const x = i * slot + (slot - barW) / 2
+    ctx.fillRect(x, mid - bar / 2, barW, bar)
+  }
+  const head = document.querySelector('#recorder-playhead')
+  if (head) head.style.left = `${Math.min(width, Math.max(0, ratio * width))}px`
+}
+
+function paintRecording() {
+  if (audioCtx?.state === 'suspended') audioCtx.resume().catch(() => {})
+  const elapsed = capture.elapsedMs()
+  if (capture.phase === 'recording') {
+    const expected = Math.floor(elapsed / WAVE_STEP_MS)
+    let guard = 0
+    while (wavePeaks.length < expected && guard < 6) {
+      wavePeaks.push(sampleLevel(analyser))
+      guard += 1
+    }
+  }
+  const clock = document.querySelector('#recorder-clock')
+  if (clock) clock.textContent = formatFine(elapsed)
+  const canvas = document.querySelector('#recorder-wave')
+  if (!canvas) return
+  const metrics = paintRuler(canvas.clientWidth, elapsed)
+  drawLiveWave(canvas, wavePeaks, metrics)
+  const head = document.querySelector('#recorder-playhead')
+  if (head && metrics) head.style.left = `${metrics.playheadX}px`
+}
+
+function startWaveLoop() {
+  const gen = ++waveGen
+  const frame = () => {
+    if (gen !== waveGen || panelMode !== 'recording') return
+    paintRecording()
+    requestAnimationFrame(frame)
+  }
+  requestAnimationFrame(frame)
+}
+
+function stopWaveLoop() {
+  waveGen += 1
+}
+
+function playbackDuration() {
+  const audio = playback?.audio
+  if (audio && Number.isFinite(audio.duration) && audio.duration > 0 && audio.duration !== Infinity) return audio.duration
+  const ms = playback?.take?.durationMs
+  if (ms > 0) return ms / 1000
+  return 0
+}
+
+function paintPlayback(forcedRatio) {
+  if (panelMode !== 'playback' || !playback) return
+  const duration = playbackDuration()
+  const current = playback.audio?.currentTime || 0
+  const ratio = forcedRatio != null ? forcedRatio : duration > 0 ? Math.min(1, Math.max(0, current / duration)) : 0
+  playback.ratio = ratio
+  const clock = document.querySelector('#recorder-clock')
+  if (clock) {
+    const shown = forcedRatio != null ? forcedRatio * duration : current
+    clock.textContent = `${formatFine(shown * 1000)} / ${formatFine(duration * 1000)}`
+  }
+  const canvas = document.querySelector('#recorder-wave')
+  if (!canvas) return
+  drawPlaybackWave(canvas, playback.peaks, ratio)
+  paintPlaybackRuler(canvas.clientWidth, duration * 1000)
+}
+
+function startPlayLoop() {
+  const gen = ++playGen
+  const frame = () => {
+    if (gen !== playGen) return
+    if (!playback?.audio || playback.audio.paused || playback.audio.ended) return
+    paintPlayback()
+    requestAnimationFrame(frame)
+  }
+  requestAnimationFrame(frame)
+}
+
+function stopPlayLoop() {
+  playGen += 1
+}
+
+function syncPanelChrome() {
+  const panel = document.querySelector('#recorder-panel')
+  if (!panel) return
+  const open = panelMode === 'recording' || panelMode === 'playback'
+  panel.classList.toggle('is-open', open)
+  panel.dataset.mode = panelMode
+  panel.setAttribute('aria-hidden', open ? 'false' : 'true')
+  if (open) panel.removeAttribute('inert')
+  else panel.setAttribute('inert', '')
+  const recording = panelMode === 'recording'
+  const playing = panelMode === 'playback'
+  const stop = panel.querySelector('#recorder-stop')
+  const pause = panel.querySelector('#recorder-pause')
+  const play = panel.querySelector('#recorder-play')
+  const close = panel.querySelector('#recorder-close')
+  if (stop) stop.hidden = !recording
+  if (pause) {
+    pause.hidden = !recording
+    const paused = capture.phase === 'paused'
+    pause.innerHTML = paused ? PLAY_ICON : PAUSE_ICON
+    pause.setAttribute('aria-label', paused ? 'Resume recording' : 'Pause recording')
+    pause.setAttribute('aria-pressed', paused ? 'true' : 'false')
+  }
+  if (play) {
+    play.hidden = !playing
+    const paused = !playback?.audio || playback.audio.paused || playback.audio.ended
+    play.innerHTML = paused ? PLAY_ICON : PAUSE_ICON
+    play.setAttribute('aria-label', paused ? 'Play' : 'Pause')
+    play.setAttribute('aria-pressed', paused ? 'false' : 'true')
+  }
+  if (close) close.hidden = !playing
+  const mic = panel.querySelector('#recorder-mic')
+  if (mic) {
+    if (recording) {
+      mic.textContent = micLabel || 'Microphone'
+      mic.title = micLabel || 'Microphone'
+    } else if (playing) {
+      const when = formatTakeWhen(playback?.take?.createdAt)
+      mic.textContent = when
+      mic.title = when
+    } else {
+      mic.textContent = ''
+      mic.title = ''
+    }
+  }
+  const canvas = panel.querySelector('#recorder-wave')
+  if (canvas) canvas.setAttribute('aria-label', playing ? 'Playback waveform' : 'Recording waveform')
+}
+
+function markActiveTake() {
+  const id = panelMode === 'playback' ? playback?.take?.id : null
+  for (const row of document.querySelectorAll('#takes-list [data-take-id]')) {
+    row.classList.toggle('is-on', id != null && row.dataset.takeId === String(id))
+  }
+}
+
+function releasePlayback() {
+  stopPlayLoop()
+  seeking = false
+  if (playback?.audio) {
+    playback.audio.pause()
+    playback.audio.removeAttribute('src')
+    playback.audio.load?.()
+  }
+  if (playback?.url) URL.revokeObjectURL(playback.url)
+  playback = null
+}
+
+function closeRecorderPanel() {
+  if (panelMode === 'recording' && capture.isActive()) return
+  const panel = document.querySelector('#recorder-panel')
+  if (panel?.contains(document.activeElement)) document.querySelector('#rec')?.focus()
+  stopWaveLoop()
+  releasePlayback()
+  panelMode = 'closed'
+  syncPanelChrome()
+  markActiveTake()
+}
+
+function restoreRecorderPanel() {
+  if (panelMode === 'recording' && capture.isActive()) {
+    syncPanelChrome()
+    startWaveLoop()
+    return
+  }
+  if (panelMode === 'playback' && playback) {
+    syncPanelChrome()
+    paintPlayback()
+    if (playback.audio && !playback.audio.paused && !playback.audio.ended) startPlayLoop()
+    markActiveTake()
+    return
+  }
+  panelMode = 'closed'
+  syncPanelChrome()
+}
+
+function ratioFromPointer(event) {
+  const canvas = document.querySelector('#recorder-wave')
+  if (!canvas) return 0
+  const rect = canvas.getBoundingClientRect()
+  if (!rect.width) return 0
+  return Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width))
+}
+
+function seekPlayback(ratio) {
+  const duration = playbackDuration()
+  const audio = playback?.audio
+  if (!audio || !duration) return
+  try {
+    audio.currentTime = ratio * duration
+  } catch {
+    /* metadata not in yet */
+  }
+  paintPlayback(ratio)
+}
+
+function bindWavePointer() {
+  const wrap = document.querySelector('#recorder-wave-wrap')
+  if (!wrap) return
+  wrap.addEventListener('pointerdown', (event) => {
+    if (panelMode !== 'playback' || !playback) return
+    seeking = true
+    wrap.setPointerCapture?.(event.pointerId)
+    seekPlayback(ratioFromPointer(event))
+  })
+  wrap.addEventListener('pointermove', (event) => {
+    if (!seeking) return
+    seekPlayback(ratioFromPointer(event))
+  })
+  const end = (event) => {
+    if (!seeking) return
+    seeking = false
+    if (event) seekPlayback(ratioFromPointer(event))
+  }
+  wrap.addEventListener('pointerup', end)
+  wrap.addEventListener('pointercancel', () => {
+    seeking = false
+  })
+}
+
+async function decodeTakePeaks(blob) {
+  const Ctx = window.AudioContext || window.webkitAudioContext
+  if (!Ctx || !blob?.arrayBuffer) throw new Error('decode unavailable')
+  const ctx = new Ctx()
+  try {
+    if (ctx.state === 'suspended') await ctx.resume().catch(() => {})
+    const bytes = await blob.arrayBuffer()
+    const buffer = await ctx.decodeAudioData(bytes.slice(0))
+    return waveformPeaks(buffer, 200)
+  } finally {
+    ctx.close().catch(() => {})
+  }
+}
+
+async function openPlayback(take) {
+  if (!take?.blob) return
+  stopWaveLoop()
+  releasePlayback()
+  const url = URL.createObjectURL(take.blob)
+  const audio = new Audio()
+  audio.preload = 'auto'
+  audio.src = url
+  playback = { take, url, audio, peaks: take.livePeaks || null, ratio: 0 }
+  panelMode = 'playback'
+  audio.addEventListener('ended', () => {
+    stopPlayLoop()
+    syncPanelChrome()
+    paintPlayback()
+  })
+  audio.addEventListener('loadedmetadata', () => {
+    if (playback?.audio === audio && !seeking) paintPlayback()
+  })
+  syncPanelChrome()
+  paintPlayback()
+  markActiveTake()
+  try {
+    const peaks = await decodeTakePeaks(take.blob)
+    if (playback?.take !== take) return
+    playback.peaks = peaks
+    paintPlayback()
+  } catch {
+    if (playback?.take === take) paintPlayback()
+  }
+}
+
+function togglePlayback() {
+  const audio = playback?.audio
+  if (!audio) return
+  if (!audio.paused && !audio.ended) {
+    audio.pause()
+    stopPlayLoop()
+    syncPanelChrome()
+    paintPlayback()
+    return
+  }
+  const duration = playbackDuration()
+  if (audio.ended || (duration && audio.currentTime >= duration - 0.05)) {
+    try {
+      audio.currentTime = 0
+    } catch {
+      /* not seekable yet */
+    }
+  }
+  audio
+    .play()
+    .then(() => {
+      startPlayLoop()
+      syncPanelChrome()
+    })
+    .catch(() => {
+      syncPanelChrome()
+    })
+}
+
 function renderTakeItem(take) {
   const url = URL.createObjectURL(take.blob)
   takeUrls.add(url)
   const name = takeFileName(take)
   const when = formatTakeWhen(take.createdAt)
   const iso = new Date(take.createdAt).toISOString()
+  const on = panelMode === 'playback' && playback?.take?.id === take.id
   return `
-    <li class="take">
+    <li class="take-row ${on ? 'is-on' : ''}" data-take-id="${take.id}">
       <div class="take-meta">
         <time datetime="${escapeAttr(iso)}">${escapeHtml(when)}</time>
         <span class="take-duration">${formatTakeDuration(take.durationMs)}</span>
       </div>
-      <audio controls preload="metadata" src="${escapeAttr(url)}"></audio>
       <div class="take-actions">
+        <button class="tool mini" type="button" data-take-play="${take.id}" aria-label="Play take from ${escapeAttr(when)}">Play</button>
         <a class="tool mini take-download" href="${escapeAttr(url)}" download="${escapeAttr(name)}">Download</a>
-        <button class="tool mini take-delete" type="button" data-take-delete="${take.id}" aria-label="Delete take from ${escapeAttr(when)}">Delete</button>
+        <button class="tool mini danger" type="button" data-take-delete="${take.id}" aria-label="Delete take from ${escapeAttr(when)}">Delete</button>
       </div>
     </li>`
 }
 
 async function renderTakes() {
-  const body = document.querySelector('#takes-body')
-  if (!body) return
+  const list = document.querySelector('#takes-list')
+  if (!list) return
   const key = takeTextKey(current())
   const token = ++takesToken
   let takes = []
   try {
     takes = key ? await listTakes(key) : []
   } catch {
-    if (token !== takesToken || !body.isConnected) return
-    body.innerHTML = '<p class="takes-empty">Could not load takes.</p>'
+    if (token !== takesToken || !list.isConnected) return
+    revokeTakeUrls()
+    shownTakes = []
+    list.innerHTML = '<li class="empty">Could not load takes.</li>'
     return
   }
-  if (token !== takesToken || !body.isConnected || takeTextKey(current()) !== key) return
+  if (token !== takesToken || !list.isConnected || takeTextKey(current()) !== key) return
   try {
     revokeTakeUrls()
     takes.sort((a, b) => b.createdAt - a.createdAt)
-    const count = document.querySelector('#takes-count')
-    if (count) count.textContent = takes.length ? String(takes.length) : ''
+    shownTakes = takes
     if (!takes.length) {
-      body.innerHTML = '<p class="takes-empty">No takes yet.</p>'
+      list.innerHTML = '<li class="empty">No takes yet.</li>'
       return
     }
-    body.innerHTML = `<ul class="takes-list">${takes.map((take) => renderTakeItem(take)).join('')}</ul>`
+    list.innerHTML = takes.map((take) => renderTakeItem(take)).join('')
+    markActiveTake()
   } catch {
-    if (token !== takesToken || !body.isConnected) return
-    body.innerHTML = '<p class="takes-empty">Could not load takes.</p>'
+    if (token !== takesToken || !list.isConnected) return
+    shownTakes = []
+    list.innerHTML = '<li class="empty">Could not load takes.</li>'
+  }
+}
+
+function leaveRecordingPanel() {
+  stopWaveLoop()
+  if (panelMode === 'recording') {
+    panelMode = 'closed'
+    syncPanelChrome()
   }
 }
 
 function commitTake(meta, result) {
-  stopRecTimer()
+  closeAudioGraph()
   syncRecUi()
-  if (!result?.blob || !meta?.textKey) return Promise.resolve(null)
+  if (!result?.blob || !meta?.textKey) {
+    leaveRecordingPanel()
+    return Promise.resolve(null)
+  }
+  const livePeaks = Float32Array.from(wavePeaks)
   return addTake({
     textKey: meta.textKey,
     code: meta.code,
@@ -793,24 +1321,31 @@ function commitTake(meta, result) {
     extension: result.extension,
     blob: result.blob,
   })
-    .then(async () => {
-      if (takeTextKey(current()) === meta.textKey) {
+    .then(async (saved) => {
+      saved.livePeaks = livePeaks
+      const sameText = takeTextKey(current()) === meta.textKey
+      if (sameText) {
         showRecMessage('')
         await renderTakes()
-      }
-      return true
+        if (openAfterSave) await openPlayback(saved)
+        else leaveRecordingPanel()
+      } else leaveRecordingPanel()
+      return saved
     })
     .catch((error) => {
       showRecMessage(isIdbQuotaError(error) ? QUOTA_TAKE_MESSAGE : SAVE_TAKE_MESSAGE)
+      leaveRecordingPanel()
       return null
     })
 }
 
-function stopRecordingAndSave() {
+function stopRecordingAndSave({ openAfter = true } = {}) {
   if (saveTask) return saveTask
   if (!capture.isActive()) return Promise.resolve(null)
+  openAfterSave = openAfter
   const meta = recordingMeta || takeMeta()
   recordingMeta = null
+  manualHold = false
   let resolveSave = () => {}
   const task = new Promise((resolve) => {
     resolveSave = resolve
@@ -818,16 +1353,18 @@ function stopRecordingAndSave() {
   saveTask = task
   pendingCommit = (result) => {
     pendingCommit = null
+    stopWaveLoop()
     commitTake(meta, result).then(resolveSave)
   }
   try {
     capture.stop()
   } catch {
     pendingCommit = null
+    closeAudioGraph()
     showRecMessage(SAVE_TAKE_MESSAGE)
+    leaveRecordingPanel()
     resolveSave(null)
   }
-  stopRecTimer()
   syncRecUi()
   task.finally(() => {
     if (saveTask === task) saveTask = null
@@ -837,40 +1374,95 @@ function stopRecordingAndSave() {
 
 async function startRecording() {
   if (capture.isActive()) return
+  releasePlayback()
+  stopPlayLoop()
+  closeAudioGraph()
+  ensureAudioContext()
   showRecMessage('')
+  wavePeaks = []
+  micLabel = 'Microphone'
+  manualHold = false
+  panelMode = 'recording'
   recordingMeta = takeMeta()
+  syncPanelChrome()
+  paintRecording()
   let result = null
   try {
     result = await capture.start()
   } catch (error) {
     recordingMeta = null
+    panelMode = 'closed'
+    stopWaveLoop()
+    closeAudioGraph()
+    syncPanelChrome()
     showRecMessage(describeMediaError(error))
     syncRecUi()
     return
   }
   if (!result?.started) {
     recordingMeta = null
+    panelMode = 'closed'
+    stopWaveLoop()
+    closeAudioGraph()
+    syncPanelChrome()
     syncRecUi()
     return
   }
   if (!recordingMeta) recordingMeta = takeMeta()
+  if (capture.stream) attachAnalyser(capture.stream)
+  if (panelMode !== 'recording' || !capture.isActive()) {
+    closeAudioGraph()
+    return
+  }
+  startWaveLoop()
   if (recWithRun) playRun()
   syncRecUi()
-  startRecTimer()
+  if (capture.stream) {
+    const label = await readMicLabel(capture.stream)
+    if (panelMode === 'recording' && capture.isActive()) {
+      micLabel = label
+      const mic = document.querySelector('#recorder-mic')
+      if (mic) {
+        mic.textContent = micLabel
+        mic.title = micLabel
+      }
+    }
+  }
+}
+
+function finishRecording(options) {
+  if (!capture.isActive()) return Promise.resolve(null)
+  const pauseWith = recWithRun
+  const task = stopRecordingAndSave(options)
+  if (pauseWith) pauseRun()
+  return task
 }
 
 function toggleRecording() {
-  if (capture.phase === 'starting') {
-    capture.cancel()
-    return stopRecordingAndSave()
-  }
-  if (capture.isActive()) {
-    const pauseWith = recWithRun
-    const task = stopRecordingAndSave()
-    if (pauseWith) pauseRun()
-    return task
-  }
+  if (capture.isActive()) return finishRecording()
   return startRecording()
+}
+
+function pauseRecordingFromPanel() {
+  if (capture.phase !== 'recording') return
+  if (recWithRun) {
+    manualHold = false
+    pauseRun()
+    return
+  }
+  manualHold = true
+  capture.pause()
+  syncRecUi()
+}
+
+function resumeRecordingFromPanel() {
+  if (capture.phase !== 'paused') return
+  manualHold = false
+  if (recWithRun) playRun()
+  else {
+    capture.resume()
+    syncRecUi()
+  }
 }
 
 function onRecWithRunChange(event) {
@@ -887,15 +1479,62 @@ async function deleteShownTake(id) {
     showRecMessage(DELETE_TAKE_MESSAGE)
     return
   }
+  if (playback?.take?.id === id) closeRecorderPanel()
   await renderTakes()
 }
 
+async function playShownTake(id) {
+  const take = shownTakes.find((item) => item.id === id)
+  if (!take) return
+  if (panelMode === 'playback' && playback?.take?.id === id) {
+    if (playback.audio?.paused || playback.audio?.ended) togglePlayback()
+    return
+  }
+  if (capture.isActive()) await stopRecordingAndSave({ openAfter: false })
+  const fresh = shownTakes.find((item) => item.id === id) || take
+  await openPlayback(fresh)
+}
+
 function onTakesClick(event) {
-  const button = event.target.closest('[data-take-delete]')
-  if (!button) return
-  const id = Number(button.dataset.takeDelete)
-  if (!Number.isInteger(id)) return
-  void deleteShownTake(id)
+  const del = event.target.closest('[data-take-delete]')
+  if (del) {
+    const id = Number(del.dataset.takeDelete)
+    if (Number.isInteger(id)) void deleteShownTake(id)
+    return
+  }
+  const play = event.target.closest('[data-take-play]')
+  if (!play) return
+  const id = Number(play.dataset.takePlay)
+  if (Number.isInteger(id)) void playShownTake(id)
+}
+
+function recorderPanelHtml() {
+  return `
+    <div class="recorder-panel" id="recorder-panel" data-mode="closed" aria-hidden="true" inert>
+      <div class="recorder-clip">
+        <div class="recorder-body">
+          <div class="recorder-visual" id="recorder-visual">
+            <div class="recorder-ruler" id="recorder-ruler" aria-hidden="true">
+              <div class="recorder-ruler-track" id="recorder-ruler-track"></div>
+            </div>
+            <div class="recorder-wave-wrap" id="recorder-wave-wrap">
+              <canvas id="recorder-wave" class="recorder-wave" aria-label="Recording waveform"></canvas>
+            </div>
+            <div class="recorder-playhead" id="recorder-playhead" aria-hidden="true"></div>
+          </div>
+          <div class="recorder-bar">
+            <p class="recorder-mic" id="recorder-mic"></p>
+            <p class="recorder-clock" id="recorder-clock">00:00.00</p>
+            <div class="recorder-actions">
+              <button class="btn icon-btn" id="recorder-stop" type="button" aria-label="Stop recording">${STOP_ICON}</button>
+              <button class="btn icon-btn" id="recorder-pause" type="button" aria-label="Pause recording" aria-pressed="false">${PAUSE_ICON}</button>
+              <button class="btn icon-btn" id="recorder-play" type="button" aria-label="Play" aria-pressed="false" hidden>${PLAY_ICON}</button>
+              <button class="btn icon-btn" id="recorder-close" type="button" aria-label="Close recorder" hidden>${CLOSE_ICON}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`
 }
 
 const app = document.querySelector('#app')
@@ -910,6 +1549,9 @@ function setTheme(next) {
   writeStorage(THEME_KEY, JSON.stringify(next))
   const button = document.querySelector('#theme')
   if (button) button.textContent = next === 'dark' ? 'Light' : 'Dark'
+  colorCache = { theme: '', ink: '', line: '' }
+  if (panelMode === 'recording') paintRecording()
+  else if (panelMode === 'playback') paintPlayback()
 }
 
 function filtered() {
@@ -1059,10 +1701,11 @@ async function reloadEssays() {
 }
 
 function selectReading({ kind, index = 0, id = null }) {
-  void stopRecordingAndSave()
+  void stopRecordingAndSave({ openAfter: false })
   const prevKey = state.kind === 'import' ? state.importId : essays[state.index]?.file
   const nextKey = kind === 'import' ? id : essays[index]?.file
   const changed = prevKey !== nextKey
+  if (changed) closeRecorderPanel()
   state.running = false
   wheelLeft = 0
   stopLoop()
@@ -1417,43 +2060,45 @@ function applyFontSize(next) {
   scheduleSave()
 }
 
-function stageEl() {
-  return document.querySelector('#text-view')
+function frameEl() {
+  return document.querySelector('#stage-frame')
 }
 
 function syncFullscreenButton() {
   const button = document.querySelector('#fullscreen')
-  const stage = stageEl()
-  if (!button || !stage) return
-  const on = stage.classList.contains('is-fullscreen')
+  const frame = frameEl()
+  if (!button || !frame) return
+  const on = frame.classList.contains('is-fullscreen')
   button.setAttribute('aria-pressed', on ? 'true' : 'false')
   button.setAttribute('aria-label', on ? 'Exit fullscreen' : 'Enter fullscreen')
   button.innerHTML = on ? EXIT_ICON : ENTER_ICON
 }
 
 function setFullscreenMode(on) {
-  const stage = stageEl()
-  if (!stage) return
-  stage.classList.toggle('is-fullscreen', on)
+  const frame = frameEl()
+  if (!frame) return
+  frame.classList.toggle('is-fullscreen', on)
   document.documentElement.classList.toggle('is-reading-fullscreen', on)
   syncFullscreenButton()
   if (anchor) anchor = { index: anchor.index, fraction: anchor.fraction, width: -1, height: -1 }
   measure()
   applyOffset()
+  if (panelMode === 'recording') paintRecording()
+  else if (panelMode === 'playback') paintPlayback()
 }
 
 async function toggleFullscreen() {
-  const stage = stageEl()
-  if (!stage) return
-  const wasOn = document.fullscreenElement === stage || stage.classList.contains('is-fullscreen')
+  const frame = frameEl()
+  if (!frame) return
+  const wasOn = document.fullscreenElement === frame || frame.classList.contains('is-fullscreen')
   try {
-    if (document.fullscreenElement === stage) await document.exitFullscreen()
-    else if (!wasOn) await stage.requestFullscreen()
+    if (document.fullscreenElement === frame) await document.exitFullscreen()
+    else if (!wasOn) await frame.requestFullscreen()
   } catch {
     /* Headless Chrome and browsers without a display reject the Fullscreen API. */
   }
-  if (wasOn) setFullscreenMode(document.fullscreenElement === stage)
-  else setFullscreenMode(document.fullscreenElement === stage || document.fullscreenElement == null)
+  if (wasOn) setFullscreenMode(document.fullscreenElement === frame)
+  else setFullscreenMode(document.fullscreenElement === frame || document.fullscreenElement == null)
 }
 
 function bindSheet() {
@@ -1465,7 +2110,20 @@ function bindSheet() {
     void toggleRecording()
   })
   document.querySelector('#rec-with-run')?.addEventListener('change', onRecWithRunChange)
-  document.querySelector('#takes-body')?.addEventListener('click', onTakesClick)
+  document.querySelector('#recorder-stop')?.addEventListener('click', () => {
+    void finishRecording()
+  })
+  document.querySelector('#recorder-pause')?.addEventListener('click', () => {
+    if (capture.phase === 'paused') resumeRecordingFromPanel()
+    else pauseRecordingFromPanel()
+  })
+  document.querySelector('#recorder-play')?.addEventListener('click', () => {
+    togglePlayback()
+  })
+  document.querySelector('#recorder-close')?.addEventListener('click', () => {
+    closeRecorderPanel()
+  })
+  bindWavePointer()
   document.querySelector('#to-top')?.addEventListener('click', toTop)
   document.querySelector('#fullscreen')?.addEventListener('click', () => {
     toggleFullscreen()
@@ -1492,7 +2150,6 @@ function bindSheet() {
 }
 
 function renderSheet() {
-  revokeTakeUrls()
   const sheet = document.querySelector('.sheet')
   const essay = current()
   activeIndex = -1
@@ -1503,6 +2160,7 @@ function renderSheet() {
     lineMetrics = []
     offsetCache = { width: 0, height: 0, focusShift: 0, max: 0 }
     sheet.innerHTML = '<p class="empty">No essays found. Add an E01-....txt file next to this reader.</p>'
+    void renderTakes()
     return
   }
   sheet.innerHTML = `
@@ -1516,7 +2174,6 @@ function renderSheet() {
         <button class="btn rec" id="rec" type="button" aria-pressed="false" aria-label="Start recording">
           <span class="rec-dot" aria-hidden="true"></span>
           <span>Rec</span>
-          <span class="rec-time" data-rec-time hidden>00:00</span>
         </button>
         <label class="rec-with-run">
           <input id="rec-with-run" type="checkbox" ${recWithRun ? 'checked' : ''} />
@@ -1536,12 +2193,13 @@ function renderSheet() {
         </div>
         <p class="rec-message" data-rec-message role="alert" hidden></p>
       </div>
+      <div class="stage-frame" id="stage-frame">
+      ${recorderPanelHtml()}
       <div class="stage" id="text-view">
         <p class="rec-message rec-stage-message" data-rec-message role="alert" hidden></p>
         <button class="btn rec rec-stage" id="rec-stage" type="button" aria-pressed="false" aria-label="Start recording">
           <span class="rec-dot" aria-hidden="true"></span>
           <span>Rec</span>
-          <span class="rec-time" data-rec-time hidden>00:00</span>
         </button>
         <div class="guide" aria-hidden="true"></div>
         <div class="script" id="text-script">${renderLines(essay.body)}</div>
@@ -1559,14 +2217,11 @@ function renderSheet() {
           </svg>
         </button>
       </div>
-      <details class="takes" id="takes" open>
-        <summary>Takes <span id="takes-count" class="takes-count"></span></summary>
-        <div id="takes-body"></div>
-      </details>
+      </div>
     </div>`
   bindSheet()
   syncRecUi()
-  if (capture.phase === 'recording' || capture.phase === 'paused') startRecTimer()
+  restoreRecorderPanel()
   void renderTakes()
   const view = document.querySelector('#text-view')
   if (view) resizeObserver.observe(view)
@@ -1613,6 +2268,10 @@ function mount() {
           </div>
           <p id="import-note" class="load-error" role="status" hidden></p>
           <ul id="import-list" aria-labelledby="imports-label"></ul>
+          <div class="side-head takes-head">
+            <p class="side-label" id="takes-label">Takes</p>
+          </div>
+          <ul id="takes-list" aria-labelledby="takes-label"></ul>
         </aside>
         <button class="backdrop" id="backdrop" type="button" aria-label="Close menu"></button>
         <main class="sheet"></main>
@@ -1674,6 +2333,7 @@ function mount() {
     const button = event.target.closest('[data-import-id]')
     if (button) selectImport(button.dataset.importId)
   })
+  document.querySelector('#takes-list')?.addEventListener('click', onTakesClick)
   const dialog = document.querySelector('#import-dialog')
   const importForm = document.querySelector('#import-form')
   dialog.addEventListener('close', () => {
@@ -1831,8 +2491,8 @@ window.addEventListener('pagehide', onPageLeave)
 window.addEventListener('beforeunload', onPageLeave)
 
 document.addEventListener('fullscreenchange', () => {
-  const stage = stageEl()
-  setFullscreenMode(!!stage && document.fullscreenElement === stage)
+  const frame = frameEl()
+  setFullscreenMode(!!frame && document.fullscreenElement === frame)
 })
 
 function isTypingTarget(target) {
@@ -1847,8 +2507,8 @@ document.addEventListener('keydown', (event) => {
   if (document.querySelector('#import-dialog')?.open) return
   const typing = isTypingTarget(event.target)
   if (event.key === 'Escape') {
-    const stage = stageEl()
-    if (stage?.classList.contains('is-fullscreen') && document.fullscreenElement !== stage) setFullscreenMode(false)
+    const frame = frameEl()
+    if (frame?.classList.contains('is-fullscreen') && document.fullscreenElement !== frame) setFullscreenMode(false)
     return
   }
   if (event.key === ' ') {
