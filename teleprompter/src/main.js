@@ -5,6 +5,17 @@ import '@fontsource/literata/latin-400.css'
 import '@fontsource/literata/latin-700.css'
 import './style.css'
 import { isEssayFile } from './essay-files.js'
+import {
+  addTake,
+  createCapture,
+  describeMediaError,
+  formatClock,
+  isQuotaError as isIdbQuotaError,
+  listTakes,
+  removeTake,
+  takeFileName,
+  warmRecordingStore,
+} from './recording.js'
 
 const THEME_KEY = 'teleprompter:theme'
 const SPEED_KEY = 'teleprompter:speed'
@@ -12,6 +23,10 @@ const ESSAY_KEY = 'teleprompter:essay'
 const POSITION_KEY = 'teleprompter:position'
 const FONT_KEY = 'teleprompter:fontSize'
 const IMPORTS_KEY = 'teleprompter:imports'
+const REC_WITH_RUN_KEY = 'teleprompter:recWithRun'
+const QUOTA_TAKE_MESSAGE = 'Could not save this take because browser storage is full.'
+const SAVE_TAKE_MESSAGE = 'Could not save this take.'
+const DELETE_TAKE_MESSAGE = 'Could not delete this take.'
 const FONT_MIN = 24
 const FONT_MAX = 56
 const FONT_DEFAULT = 32
@@ -240,6 +255,12 @@ function loadFontSize() {
   return FONT_DEFAULT
 }
 
+function loadRecWithRun() {
+  const saved = loadJSON(REC_WITH_RUN_KEY)
+  if (typeof saved === 'boolean') return saved
+  return true
+}
+
 let essays = Object.entries(files)
   .filter(([path]) => isEssayFile(path))
   .sort(([a], [b]) => a.localeCompare(b))
@@ -274,6 +295,22 @@ let offsetCache = { width: 0, height: 0, focusShift: 0, max: 0 }
 let needsRestore = true
 let restoredAnchor = null
 let saveTimer = 0
+let recWithRun = loadRecWithRun()
+let recordingMeta = null
+let saveTask = null
+let pendingCommit = null
+let recTimer = 0
+let takesToken = 0
+const takeUrls = new Set()
+const capture = createCapture({
+  onError() {
+    showRecMessage('Recording stopped because the microphone failed.')
+    void stopRecordingAndSave()
+  },
+  onStopped(result) {
+    pendingCommit?.(result)
+  },
+})
 
 function pixelsPerSecond() {
   return state.speed * 2.5
@@ -523,6 +560,7 @@ function tick(now) {
       state.running = false
       syncRunButton()
       saveProgressNow()
+      syncRecorderToRun()
     }
   } else if (state.offset < 0) {
     state.offset = 0
@@ -561,6 +599,7 @@ function scrollBy(distance) {
 function toTop() {
   state.running = false
   syncRunButton()
+  syncRecorderToRun()
   wheelLeft = -state.offset
   if (Math.abs(wheelLeft) <= 0.5) {
     wheelLeft = 0
@@ -573,15 +612,24 @@ function toTop() {
   if (!raf) startLoop()
 }
 
-function toggleRun() {
-  const essay = current()
-  if (!essay?.body) return
-  if (state.running) {
-    state.running = false
-    syncRunButton()
-    saveProgressNow()
-    if (Math.abs(wheelLeft) <= 0.5) stopLoop()
+function pauseRun() {
+  if (!state.running) {
+    syncRecorderToRun()
     return
+  }
+  state.running = false
+  syncRunButton()
+  saveProgressNow()
+  if (Math.abs(wheelLeft) <= 0.5) stopLoop()
+  syncRecorderToRun()
+}
+
+function playRun() {
+  const essay = current()
+  if (!essay?.body) return false
+  if (state.running) {
+    syncRecorderToRun()
+    return true
   }
   if (state.offset >= maxOffset() - 1) {
     state.offset = 0
@@ -590,6 +638,264 @@ function toggleRun() {
   state.running = true
   syncRunButton()
   startLoop()
+  syncRecorderToRun()
+  return true
+}
+
+function toggleRun() {
+  if (state.running) pauseRun()
+  else playRun()
+}
+
+// With "Start scrolling with recording" on, MediaRecorder pauses and resumes
+// with Run. With it off, a recorder paused by that option keeps capturing.
+function syncRecorderToRun() {
+  if (capture.phase !== 'recording' && capture.phase !== 'paused') return
+  if (!recWithRun) {
+    capture.resume()
+    syncRecUi()
+    return
+  }
+  if (state.running) capture.resume()
+  else capture.pause()
+  syncRecUi()
+}
+
+function takeTextKey(item) {
+  if (!item) return ''
+  return item.kind === 'import' ? item.id : item.code
+}
+
+function takeMeta() {
+  const item = current()
+  if (!item) return null
+  const textKey = takeTextKey(item)
+  if (!textKey) return null
+  return { textKey, code: item.code || 'take', title: item.title || 'Untitled' }
+}
+
+function showRecMessage(message) {
+  const text = message || ''
+  for (const el of document.querySelectorAll('[data-rec-message]')) {
+    el.textContent = text
+    el.hidden = !text
+  }
+}
+
+function syncRecUi() {
+  const live = capture.phase === 'recording' || capture.phase === 'paused'
+  const paused = capture.phase === 'paused'
+  const label = live ? (paused ? 'Stop recording, paused' : 'Stop recording') : 'Start recording'
+  const clock = formatClock(capture.elapsedMs())
+  for (const button of document.querySelectorAll('#rec, #rec-stage')) {
+    button.setAttribute('aria-pressed', live ? 'true' : 'false')
+    button.classList.toggle('is-recording', live)
+    button.classList.toggle('is-paused', paused)
+    button.setAttribute('aria-label', label)
+    const time = button.querySelector('[data-rec-time]')
+    if (!time) continue
+    time.hidden = !live
+    if (live) time.textContent = clock
+  }
+}
+
+function stopRecTimer() {
+  clearInterval(recTimer)
+  recTimer = 0
+}
+
+function startRecTimer() {
+  stopRecTimer()
+  const paint = () => {
+    const text = formatClock(capture.elapsedMs())
+    for (const el of document.querySelectorAll('[data-rec-time]')) el.textContent = text
+  }
+  paint()
+  recTimer = window.setInterval(paint, 200)
+}
+
+function revokeTakeUrls() {
+  for (const url of takeUrls) URL.revokeObjectURL(url)
+  takeUrls.clear()
+}
+
+function formatTakeWhen(ms) {
+  const date = new Date(ms)
+  if (Number.isNaN(date.getTime())) return ''
+  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+}
+
+function formatTakeDuration(ms) {
+  return formatClock(ms)
+}
+
+function renderTakeItem(take) {
+  const url = URL.createObjectURL(take.blob)
+  takeUrls.add(url)
+  const name = takeFileName(take)
+  const when = formatTakeWhen(take.createdAt)
+  const iso = new Date(take.createdAt).toISOString()
+  return `
+    <li class="take">
+      <div class="take-meta">
+        <time datetime="${escapeAttr(iso)}">${escapeHtml(when)}</time>
+        <span class="take-duration">${formatTakeDuration(take.durationMs)}</span>
+      </div>
+      <audio controls preload="metadata" src="${escapeAttr(url)}"></audio>
+      <div class="take-actions">
+        <a class="tool mini take-download" href="${escapeAttr(url)}" download="${escapeAttr(name)}">Download</a>
+        <button class="tool mini take-delete" type="button" data-take-delete="${take.id}" aria-label="Delete take from ${escapeAttr(when)}">Delete</button>
+      </div>
+    </li>`
+}
+
+async function renderTakes() {
+  const body = document.querySelector('#takes-body')
+  if (!body) return
+  const key = takeTextKey(current())
+  const token = ++takesToken
+  let takes = []
+  try {
+    takes = key ? await listTakes(key) : []
+  } catch {
+    if (token !== takesToken || !body.isConnected) return
+    body.innerHTML = '<p class="takes-empty">Could not load takes.</p>'
+    return
+  }
+  if (token !== takesToken || !body.isConnected || takeTextKey(current()) !== key) return
+  try {
+    revokeTakeUrls()
+    takes.sort((a, b) => b.createdAt - a.createdAt)
+    const count = document.querySelector('#takes-count')
+    if (count) count.textContent = takes.length ? String(takes.length) : ''
+    if (!takes.length) {
+      body.innerHTML = '<p class="takes-empty">No takes yet.</p>'
+      return
+    }
+    body.innerHTML = `<ul class="takes-list">${takes.map((take) => renderTakeItem(take)).join('')}</ul>`
+  } catch {
+    if (token !== takesToken || !body.isConnected) return
+    body.innerHTML = '<p class="takes-empty">Could not load takes.</p>'
+  }
+}
+
+function commitTake(meta, result) {
+  stopRecTimer()
+  syncRecUi()
+  if (!result?.blob || !meta?.textKey) return Promise.resolve(null)
+  return addTake({
+    textKey: meta.textKey,
+    code: meta.code,
+    title: meta.title,
+    createdAt: Date.now(),
+    durationMs: Math.max(0, Math.round(result.durationMs)),
+    mimeType: result.mimeType,
+    extension: result.extension,
+    blob: result.blob,
+  })
+    .then(async () => {
+      if (takeTextKey(current()) === meta.textKey) {
+        showRecMessage('')
+        await renderTakes()
+      }
+      return true
+    })
+    .catch((error) => {
+      showRecMessage(isIdbQuotaError(error) ? QUOTA_TAKE_MESSAGE : SAVE_TAKE_MESSAGE)
+      return null
+    })
+}
+
+function stopRecordingAndSave() {
+  if (saveTask) return saveTask
+  if (!capture.isActive()) return Promise.resolve(null)
+  const meta = recordingMeta || takeMeta()
+  recordingMeta = null
+  let resolveSave = () => {}
+  const task = new Promise((resolve) => {
+    resolveSave = resolve
+  })
+  saveTask = task
+  pendingCommit = (result) => {
+    pendingCommit = null
+    commitTake(meta, result).then(resolveSave)
+  }
+  try {
+    capture.stop()
+  } catch {
+    pendingCommit = null
+    showRecMessage(SAVE_TAKE_MESSAGE)
+    resolveSave(null)
+  }
+  stopRecTimer()
+  syncRecUi()
+  task.finally(() => {
+    if (saveTask === task) saveTask = null
+  })
+  return task
+}
+
+async function startRecording() {
+  if (capture.isActive()) return
+  showRecMessage('')
+  recordingMeta = takeMeta()
+  let result = null
+  try {
+    result = await capture.start()
+  } catch (error) {
+    recordingMeta = null
+    showRecMessage(describeMediaError(error))
+    syncRecUi()
+    return
+  }
+  if (!result?.started) {
+    recordingMeta = null
+    syncRecUi()
+    return
+  }
+  if (!recordingMeta) recordingMeta = takeMeta()
+  if (recWithRun) playRun()
+  syncRecUi()
+  startRecTimer()
+}
+
+function toggleRecording() {
+  if (capture.phase === 'starting') {
+    capture.cancel()
+    return stopRecordingAndSave()
+  }
+  if (capture.isActive()) {
+    const pauseWith = recWithRun
+    const task = stopRecordingAndSave()
+    if (pauseWith) pauseRun()
+    return task
+  }
+  return startRecording()
+}
+
+function onRecWithRunChange(event) {
+  recWithRun = Boolean(event.target.checked)
+  writeStorage(REC_WITH_RUN_KEY, JSON.stringify(recWithRun))
+  syncRecorderToRun()
+}
+
+async function deleteShownTake(id) {
+  if (!window.confirm('Delete this take?')) return
+  try {
+    await removeTake(id)
+  } catch {
+    showRecMessage(DELETE_TAKE_MESSAGE)
+    return
+  }
+  await renderTakes()
+}
+
+function onTakesClick(event) {
+  const button = event.target.closest('[data-take-delete]')
+  if (!button) return
+  const id = Number(button.dataset.takeDelete)
+  if (!Number.isInteger(id)) return
+  void deleteShownTake(id)
 }
 
 const app = document.querySelector('#app')
@@ -725,6 +1031,7 @@ async function reloadEssays() {
     }
     const found = essays.findIndex((item) => item.file === currentFile)
     if (found === -1) {
+      void stopRecordingAndSave()
       state.kind = 'essay'
       state.importId = null
       state.index = 0
@@ -752,6 +1059,7 @@ async function reloadEssays() {
 }
 
 function selectReading({ kind, index = 0, id = null }) {
+  void stopRecordingAndSave()
   const prevKey = state.kind === 'import' ? state.importId : essays[state.index]?.file
   const nextKey = kind === 'import' ? id : essays[index]?.file
   const changed = prevKey !== nextKey
@@ -985,6 +1293,7 @@ function deleteImport(id) {
   if (state.kind === 'import' && state.importId === id) {
     if (essays.length) select(0)
     else {
+      void stopRecordingAndSave()
       state.kind = 'essay'
       state.index = 0
       state.importId = null
@@ -1149,6 +1458,14 @@ async function toggleFullscreen() {
 
 function bindSheet() {
   document.querySelector('#run')?.addEventListener('click', toggleRun)
+  document.querySelector('#rec')?.addEventListener('click', () => {
+    void toggleRecording()
+  })
+  document.querySelector('#rec-stage')?.addEventListener('click', () => {
+    void toggleRecording()
+  })
+  document.querySelector('#rec-with-run')?.addEventListener('change', onRecWithRunChange)
+  document.querySelector('#takes-body')?.addEventListener('click', onTakesClick)
   document.querySelector('#to-top')?.addEventListener('click', toTop)
   document.querySelector('#fullscreen')?.addEventListener('click', () => {
     toggleFullscreen()
@@ -1175,6 +1492,7 @@ function bindSheet() {
 }
 
 function renderSheet() {
+  revokeTakeUrls()
   const sheet = document.querySelector('.sheet')
   const essay = current()
   activeIndex = -1
@@ -1195,6 +1513,15 @@ function renderSheet() {
     <div class="read">
       <div class="transport">
         <button class="btn ${state.running ? '' : 'btn-next'}" id="run" type="button" aria-pressed="${state.running ? 'true' : 'false'}">${state.running ? 'Pause' : 'Run'}</button>
+        <button class="btn rec" id="rec" type="button" aria-pressed="false" aria-label="Start recording">
+          <span class="rec-dot" aria-hidden="true"></span>
+          <span>Rec</span>
+          <span class="rec-time" data-rec-time hidden>00:00</span>
+        </button>
+        <label class="rec-with-run">
+          <input id="rec-with-run" type="checkbox" ${recWithRun ? 'checked' : ''} />
+          Start scrolling with recording
+        </label>
         <div class="sliders">
           <label class="speed">
             Speed
@@ -1207,8 +1534,15 @@ function renderSheet() {
             <span id="font-size-value">${state.fontSize}</span>
           </label>
         </div>
+        <p class="rec-message" data-rec-message role="alert" hidden></p>
       </div>
       <div class="stage" id="text-view">
+        <p class="rec-message rec-stage-message" data-rec-message role="alert" hidden></p>
+        <button class="btn rec rec-stage" id="rec-stage" type="button" aria-pressed="false" aria-label="Start recording">
+          <span class="rec-dot" aria-hidden="true"></span>
+          <span>Rec</span>
+          <span class="rec-time" data-rec-time hidden>00:00</span>
+        </button>
         <div class="guide" aria-hidden="true"></div>
         <div class="script" id="text-script">${renderLines(essay.body)}</div>
         <div class="progress">
@@ -1225,8 +1559,15 @@ function renderSheet() {
           </svg>
         </button>
       </div>
+      <details class="takes" id="takes" open>
+        <summary>Takes <span id="takes-count" class="takes-count"></span></summary>
+        <div id="takes-body"></div>
+      </details>
     </div>`
   bindSheet()
+  syncRecUi()
+  if (capture.phase === 'recording' || capture.phase === 'paused') startRecTimer()
+  void renderTakes()
   const view = document.querySelector('#text-view')
   if (view) resizeObserver.observe(view)
   measure()
@@ -1462,6 +1803,7 @@ function escapeAttr(value) {
 
 readStorage(THEME_KEY)
 restoreEssay()
+void warmRecordingStore()
 document.documentElement.style.setProperty('--script-size', `${state.fontSize}px`)
 mount()
 
@@ -1477,23 +1819,33 @@ if (document.fonts?.ready) {
   })
 }
 
+function onPageLeave() {
+  saveProgressNow()
+  if (capture.isActive()) void stopRecordingAndSave()
+}
+
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') saveProgressNow()
+  if (document.visibilityState === 'hidden') onPageLeave()
 })
-window.addEventListener('beforeunload', saveProgressNow)
+window.addEventListener('pagehide', onPageLeave)
+window.addEventListener('beforeunload', onPageLeave)
 
 document.addEventListener('fullscreenchange', () => {
   const stage = stageEl()
   setFullscreenMode(!!stage && document.fullscreenElement === stage)
 })
 
-document.addEventListener('keydown', (event) => {
-  if (document.querySelector('#import-dialog')?.open) return
-  const target = event.target
-  const typing =
+function isTypingTarget(target) {
+  return (
     target instanceof HTMLTextAreaElement ||
     target.isContentEditable ||
     (target instanceof HTMLInputElement && ['search', 'text'].includes(target.type))
+  )
+}
+
+document.addEventListener('keydown', (event) => {
+  if (document.querySelector('#import-dialog')?.open) return
+  const typing = isTypingTarget(event.target)
   if (event.key === 'Escape') {
     const stage = stageEl()
     if (stage?.classList.contains('is-fullscreen') && document.fullscreenElement !== stage) setFullscreenMode(false)
@@ -1505,8 +1857,14 @@ document.addEventListener('keydown', (event) => {
     if (!event.repeat) toggleRun()
     return
   }
-  if ((event.key === 'f' || event.key === 'F') && !typing && !event.repeat && !event.metaKey && !event.ctrlKey && !event.altKey) {
+  const plain = !typing && !event.repeat && !event.metaKey && !event.ctrlKey && !event.altKey
+  if ((event.key === 'f' || event.key === 'F') && plain) {
     event.preventDefault()
     toggleFullscreen()
+    return
+  }
+  if ((event.key === 'r' || event.key === 'R') && plain) {
+    event.preventDefault()
+    void toggleRecording()
   }
 })
