@@ -1,3 +1,5 @@
+import { remuxMp4Blob } from './mp4remux.js'
+
 const DB_NAME = 'teleprompter'
 const DB_STORE = 'takes'
 const DB_VERSION = 1
@@ -350,7 +352,10 @@ function buildVoiceGraph(ctx, rawStream) {
  * One microphone capture. pause/resume follow MediaRecorder when the browser
  * provides them; stop() always releases the mic tracks and the voice graph.
  * onError runs if the recorder fails or the mic track ends mid-take.
- * onStopped runs synchronously once stop() has a blob (or null).
+ * onStopped runs once stop() has a blob (or null). An mp4/AAC blob is remuxed
+ * into one progressive M4A first. That blob is what playback, IndexedDB, and
+ * the Tauri Documents save all use. webm is left as recorded. If the remux
+ * fails, the original blob is used.
  */
 export function createCapture({ onError, onStopped } = {}) {
   let phase = 'idle'
@@ -519,7 +524,6 @@ export function createCapture({ onError, onStopped } = {}) {
       /* the blob is already assembled */
     }
     recorder = null
-    phase = 'idle'
     accumulated = 0
     return result
   }
@@ -530,6 +534,30 @@ export function createCapture({ onError, onStopped } = {}) {
     } catch {
       /* the caller reports save failures */
     }
+  }
+
+  async function finalizeTakeAudio(result) {
+    if (!result?.blob) return result
+    const blob = await remuxMp4Blob(result.blob, result.mimeType)
+    if (!blob?.size || blob === result.blob) return result
+    const mimeType = blob.type || result.mimeType
+    return {
+      ...result,
+      blob,
+      mimeType,
+      extension: extensionForMime(mimeType),
+    }
+  }
+
+  function publish(result) {
+    return Promise.resolve()
+      .then(() => finalizeTakeAudio(result))
+      .catch(() => result)
+      .then((finalResult) => {
+        if (phase === 'stopping') phase = 'idle'
+        emitStopped(finalResult)
+        return finalResult
+      })
   }
 
   function stop() {
@@ -546,11 +574,14 @@ export function createCapture({ onError, onStopped } = {}) {
     const durationMs = elapsedMs()
     phase = 'stopping'
     const rec = recorder
-    if (!rec || rec.state === 'inactive') {
-      const result = takeBlob(durationMs)
-      emitStopped(result)
-      return Promise.resolve(result)
+    const finishWith = (result) => {
+      const wait = publish(result).finally(() => {
+        if (stopWait === wait) stopWait = null
+      })
+      stopWait = wait
+      return wait
     }
+    if (!rec || rec.state === 'inactive') return finishWith(takeBlob(durationMs))
     let resolveStop = () => {}
     const wait = new Promise((resolve) => {
       resolveStop = resolve
@@ -560,10 +591,10 @@ export function createCapture({ onError, onStopped } = {}) {
     const finish = () => {
       if (settled) return
       settled = true
-      if (stopWait === wait) stopWait = null
-      const result = takeBlob(durationMs)
-      emitStopped(result)
-      resolveStop(result)
+      publish(takeBlob(durationMs)).then((finalResult) => {
+        if (stopWait === wait) stopWait = null
+        resolveStop(finalResult)
+      })
     }
     rec.addEventListener('stop', finish, { once: true })
     try {

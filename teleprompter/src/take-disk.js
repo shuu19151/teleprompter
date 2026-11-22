@@ -37,6 +37,8 @@ async function absoluteTakePath(fileName) {
   return join(await documentsTakeDir(), fileName)
 }
 
+// The page remuxes an mp4/AAC take before this runs, in the browser and in
+// the Tauri webview, so the Documents file is the same progressive M4A.
 export async function saveTakeToDocuments(take) {
   if (!inTauri() || !take?.blob?.size) return
   const name = takeFileName(take)
