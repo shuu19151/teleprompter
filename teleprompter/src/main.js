@@ -682,7 +682,10 @@ function updateFolderChrome() {
   const reset = document.querySelector('#use-app-essays')
   if (reset) reset.hidden = !folderHandle
   if (folderNeedsGesture) {
-    setLoadError(folderName ? `Click reload to allow reading ${folderName}.` : 'Click reload to allow reading this folder.')
+    const control = folderHandle?.path ? 'Folder' : 'reload'
+    setLoadError(
+      folderName ? `Click ${control} to allow reading ${folderName}.` : `Click ${control} to allow reading this folder.`,
+    )
   } else if (folderBootMessage) {
     setLoadError(folderBootMessage)
     folderBootMessage = ''
@@ -756,9 +759,14 @@ async function adoptSavedFolder() {
   folderHandle = handle
   folderName = handle.name || 'Folder'
   const permission = await folderPermission(handle)
-  if (permission !== 'granted') {
+  if (permission === 'prompt') {
     folderNeedsGesture = true
     essays = []
+    return
+  }
+  if (permission !== 'granted') {
+    essays = []
+    folderBootMessage = 'Could not read that folder.'
     return
   }
   try {
@@ -775,7 +783,11 @@ async function reloadEssays() {
   if (folderHandle) {
     try {
       let permission = await folderPermission(folderHandle)
-      if (permission !== 'granted') permission = await requestFolderPermission(folderHandle)
+      if (permission !== 'granted' && !folderHandle.path) permission = await requestFolderPermission(folderHandle)
+      if (permission === 'missing') {
+        setLoadError('Could not read that folder.')
+        return
+      }
       if (permission !== 'granted') {
         folderNeedsGesture = true
         updateFolderChrome()
@@ -810,7 +822,7 @@ async function chooseFolder() {
   }
   let handle
   try {
-    handle = await pickEssayFolder()
+    handle = await pickEssayFolder(folderHandle?.path)
   } catch (error) {
     if (error?.name === 'AbortError') return
     setLoadError('Could not open that folder.')

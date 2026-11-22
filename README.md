@@ -21,6 +21,22 @@ npm run preview
 
 `npm run build` writes a static site to `teleprompter/dist`. `npm run preview` serves that build at http://127.0.0.1:4173/. Essays are copied into the bundle when you build, so preview does not notice files added afterwards.
 
+## Windows app
+
+The desktop shell is Tauri 2. The window loads this same Vite app. From `teleprompter/`:
+
+```bash
+npm run tauri dev
+```
+
+That starts Vite at http://127.0.0.1:5173 and opens a desktop window. A Windows installer is built on Windows, with Rust MSVC, the C++ build tools, and WebView2:
+
+```bash
+npm run tauri build
+```
+
+The setup file is `teleprompter/src-tauri/target/release/bundle/nsis/` (`*-setup.exe`). The MSI is in `teleprompter/src-tauri/target/release/bundle/msi/`. The NSIS installer is per user and does not ask for administrator rights. The installed app opens without `npm run dev`, and the bundled E01 and E02 essays are inside it.
+
 ## Essays
 
 Essays are plain text files in `essays/` at the repo root. The name is case-sensitive: a capital `E`, then anything, then a lowercase `.txt` extension. `E01-short-title.txt` is included. `e01-short-title.txt` and `E01-short-title.TXT` are not. The same rule is used by the production glob (`E*.txt`) and by the dev-server list at `/api/essays`.
@@ -29,7 +45,7 @@ The first blank-line-separated block is the title. The rest is the script.
 
 The reload button next to Essays calls `/api/essays` until a folder is chosen. That route exists only on the Vite dev server, so the button is hidden in `build` and `preview`. On the dev server, press it to pick up a new file without restarting.
 
-Folder, the button beside Essays, opens the system folder dialog in Chrome and Edge. In another browser the button stays visible and explains that the dialog needs Chrome or Edge on http://127.0.0.1:5173. The app remembers the folder in this browser. Every file ending in `.txt`, in any letter case, that sits directly in the folder is listed. Subfolders are not read. Reload then reads that folder again, and the button stays available in a production build. Use app essays clears the choice and returns to the `essays/` files above. A cancelled dialog leaves the current list as it is. The next visit reads the folder when permission is already granted. When the browser needs a click before it can read, the sidebar asks you to press reload.
+Folder, the button beside Essays, opens a folder dialog. In the Windows app that dialog is the system folder picker from the Tauri dialog plugin. The chosen directory is allowed for that run, and the fs plugin reads every `.txt` file directly in it. Subfolders are not read. The path is remembered in this app. The next launch asks you to press Folder once so that directory can be allowed again. In Chrome or Edge on the dev server, Folder uses the browser folder picker instead, and a later visit can read the folder when permission is already granted. In another browser the button stays visible and explains that the dialog needs the Windows app, or Chrome or Edge at http://127.0.0.1:5173. Use app essays clears the choice and returns to the `essays/` files above. A cancelled dialog leaves the current list as it is.
 
 ## Your own text
 
