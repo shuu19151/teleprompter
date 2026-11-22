@@ -464,7 +464,7 @@ function tick(now) {
       state.running = false
       syncRunButton()
       saveProgressNow()
-      syncRecorderToRun()
+      // The last line stops the scroll only. Recording keeps going until Stop.
     }
   } else if (state.offset < 0) {
     state.offset = 0
