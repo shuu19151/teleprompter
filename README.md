@@ -42,3 +42,13 @@ Choosing an imported text works like choosing an essay: Space runs and pauses, t
 ## Reading
 
 Space starts and pauses scrolling. F toggles fullscreen on the reading stage, and Esc leaves it. A rust guide marks the reading point, about a third of the way down the stage. The size slider runs from 24px to 56px (32px by default) and is remembered in `localStorage` under `teleprompter:fontSize`. Script text uses Literata, with Source Serif and Georgia as fallbacks. Labels and controls stay in JetBrains Mono.
+
+## Recording
+
+Rec, next to Run, records the microphone while you read. R starts and stops it, including in fullscreen, and does nothing while you are typing in a text field. The button shows a red dot and an elapsed `mm:ss` timer while a take is open. In fullscreen the same control sits on the stage, because the transport row is hidden. Space still only starts and pauses scrolling.
+
+The microphone needs a secure page. `https` works, and so does the dev server on `http://127.0.0.1`, which counts as localhost. A denied permission, a missing microphone, or a browser without recording shows a short message under the controls.
+
+"Start scrolling with recording" is on by default and is stored in `localStorage` under `teleprompter:recWithRun`. While it is on, Rec starts scrolling and recording together, and stopping the recording pauses scrolling. Pausing Run pauses the recorder, and resuming Run resumes it, using `MediaRecorder.pause` and `resume`. While the option is off, recording keeps going when scrolling is paused. Turning the option off mid-take resumes a recorder that was paused with Run.
+
+Each finished take is stored in IndexedDB (database `teleprompter`, store `takes`), keyed by the essay code (`E01`) or the imported text's id, so a reload brings the same takes back. The list under the stage shows the time, the duration, a player, Download, and Delete. Delete asks you to confirm. Download uses `<code>-<title-slug>-<YYYYMMDD-HHMM>.webm` (or `.mp4` when that is the recorded type), from the text's code and title at the time of the take. If storage is full, a message under the controls says so and the take is not kept. Switching texts, hiding the page, or leaving it stops the take and saves what was recorded. The microphone is released when the take stops. Blob URLs for the players are revoked when the list is redrawn or a take is removed.
