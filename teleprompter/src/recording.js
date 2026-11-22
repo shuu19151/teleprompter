@@ -13,6 +13,64 @@ export function formatClock(ms) {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
 }
 
+/** mm:ss.cc, centiseconds, matching a sound-recorder clock (00:04.08). */
+export function formatFine(ms) {
+  const clamped = Math.max(0, Number(ms) || 0)
+  const totalCentis = Math.floor(clamped / 10)
+  const centis = totalCentis % 100
+  const totalSeconds = Math.floor(totalCentis / 100)
+  const seconds = totalSeconds % 60
+  const minutes = Math.floor(totalSeconds / 60)
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(centis).padStart(2, '0')}`
+}
+
+/** Peak and RMS of one AnalyserNode time-domain frame, 0–1. */
+export function sampleLevel(analyser) {
+  if (!analyser) return 0
+  const buf = new Float32Array(analyser.fftSize)
+  analyser.getFloatTimeDomainData(buf)
+  let sum = 0
+  let peak = 0
+  for (let i = 0; i < buf.length; i += 1) {
+    const value = buf[i]
+    sum += value * value
+    const abs = value < 0 ? -value : value
+    if (abs > peak) peak = abs
+  }
+  const rms = Math.sqrt(sum / (buf.length || 1))
+  return Math.min(1, Math.max(peak, rms * 2.5))
+}
+
+/** One peak per bar across the whole buffer, mixing channels. */
+export function waveformPeaks(audioBuffer, bars) {
+  const count = Math.max(1, bars | 0)
+  const channels = audioBuffer.numberOfChannels || 1
+  const length = audioBuffer.length || 0
+  const peaks = new Float32Array(count)
+  if (!length) return peaks
+  const block = Math.max(1, Math.floor(length / count))
+  for (let i = 0; i < count; i += 1) {
+    const start = i * block
+    const end = Math.min(length, i === count - 1 ? length : start + block)
+    let peak = 0
+    let sum = 0
+    let n = 0
+    for (let channel = 0; channel < channels; channel += 1) {
+      const data = audioBuffer.getChannelData(channel)
+      for (let j = start; j < end; j += 1) {
+        const value = data[j]
+        const abs = value < 0 ? -value : value
+        if (abs > peak) peak = abs
+        sum += value * value
+        n += 1
+      }
+    }
+    const rms = Math.sqrt(sum / (n || 1))
+    peaks[i] = Math.min(1, Math.max(peak, rms * 2.5))
+  }
+  return peaks
+}
+
 export function titleSlug(title) {
   const slug = String(title ?? '')
     .normalize('NFKD')
@@ -370,6 +428,9 @@ export function createCapture({ onError, onStopped } = {}) {
   return {
     get phase() {
       return phase
+    },
+    get stream() {
+      return stream
     },
     elapsedMs,
     isActive,

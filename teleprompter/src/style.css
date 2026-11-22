@@ -442,19 +442,51 @@ h1 {
   .search { max-width: none; }
 }
 
-.stage:fullscreen,
-.stage.is-fullscreen {
+.stage-frame {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.stage-frame:fullscreen,
+.stage-frame.is-fullscreen {
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
   min-height: 0;
-  border-radius: 0;
   background: var(--sheet);
 }
 
-.stage.is-fullscreen:not(:fullscreen) {
+.stage-frame.is-fullscreen:not(:fullscreen) {
   position: fixed;
   z-index: 40;
   inset: 0;
+}
+
+.stage-frame:fullscreen .stage,
+.stage-frame.is-fullscreen .stage {
+  flex: 1 1 auto;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.stage-frame:fullscreen .recorder-panel.is-open,
+.stage-frame.is-fullscreen .recorder-panel.is-open {
+  margin-bottom: 0;
+}
+
+.stage-frame:fullscreen .recorder-body,
+.stage-frame.is-fullscreen .recorder-body {
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  box-shadow: none;
 }
 
 html.is-reading-fullscreen .topbar,
@@ -467,7 +499,8 @@ html.is-reading-fullscreen .transport {
 
 @media (prefers-reduced-motion: reduce) {
   .line,
-  .sidebar {
+  .sidebar,
+  .recorder-panel {
     transition: none;
   }
 }
@@ -710,8 +743,8 @@ html.is-reading-fullscreen .transport {
   right: 14px;
 }
 
-.stage.is-fullscreen .rec-stage,
-.stage:fullscreen .rec-stage {
+.stage-frame.is-fullscreen .rec-stage,
+.stage-frame:fullscreen .rec-stage {
   position: absolute;
   z-index: 4;
   top: 12px;
@@ -720,60 +753,25 @@ html.is-reading-fullscreen .transport {
   background: var(--sheet);
 }
 
-.stage.is-fullscreen .rec-stage-message:not([hidden]),
-.stage:fullscreen .rec-stage-message:not([hidden]) {
+.stage-frame.is-fullscreen .rec-stage-message:not([hidden]),
+.stage-frame:fullscreen .rec-stage-message:not([hidden]) {
   display: block;
 }
 
-.takes {
-  margin-top: 14px;
-  border: 1.5px solid var(--line);
-  border-radius: var(--radius);
+.takes-head { margin-top: 22px; }
+
+.take-row {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 9px;
   background: var(--card);
 }
 
-.takes summary {
-  padding: 10px 12px;
-  color: var(--muted);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  cursor: pointer;
-}
-
-.takes-count {
-  margin-left: 6px;
-  color: var(--ink);
-  font-weight: 700;
-  letter-spacing: 0;
-  text-transform: none;
-}
-
-.takes-count:empty { display: none; }
-
-#takes-body { padding: 0 12px 12px; }
-
-.takes-empty {
-  margin: 0;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.takes-list {
-  display: grid;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.take {
-  display: grid;
-  gap: 8px;
-  padding: 10px;
-  border: 1.5px solid var(--line);
-  border-radius: 9px;
-  background: var(--sheet);
+.take-row.is-on {
+  background: var(--green-tile);
+  border-color: var(--edge);
 }
 
 .take-meta {
@@ -781,38 +779,193 @@ html.is-reading-fullscreen .transport {
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
+}
+
+.take-meta time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .take-duration {
+  flex: 0 0 auto;
   color: var(--ink);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
-.take audio {
-  width: 100%;
-  height: 36px;
-}
-
 .take-actions {
   display: flex;
-  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.take-download { text-decoration: none; }
+
+.recorder-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  margin: 0;
+  transition: grid-template-rows 0.28s ease, margin-bottom 0.28s ease;
+}
+
+.recorder-panel.is-open {
+  grid-template-rows: 1fr;
+  margin-bottom: 10px;
+}
+
+.recorder-clip {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.recorder-body {
+  box-sizing: border-box;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: 1.5px 2.5px 0 var(--edge);
+  color: var(--ink);
+  font-family: var(--font);
+}
+
+.recorder-visual {
+  position: relative;
+  height: 86px;
+}
+
+.recorder-ruler {
+  position: relative;
+  height: 18px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.recorder-ruler-track { position: absolute; inset: 0; }
+
+.ruler-tick {
+  position: absolute;
+  bottom: 0;
+  width: 1px;
+  background: var(--line-strong);
+}
+
+.ruler-tick.major { height: 7px; }
+.ruler-tick.minor { height: 4px; }
+
+.ruler-label {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.recorder-wave-wrap {
+  height: 68px;
+}
+
+.recorder-wave {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.recorder-panel[data-mode="playback"] .recorder-wave-wrap {
+  cursor: pointer;
+  touch-action: none;
+}
+
+.recorder-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--danger);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.recorder-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+
+.recorder-mic {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recorder-clock {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--ink);
+  font-size: 26px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.recorder-panel[data-mode="playback"] .recorder-clock { font-size: 16px; }
+
+.recorder-actions {
+  display: flex;
+  flex: 0 0 auto;
   gap: 6px;
 }
 
-.take-delete { color: var(--rust); }
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+}
+
+.icon-btn[hidden] { display: none; }
+
+#recorder-stop {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--card);
+}
 
 .rec:focus-visible,
 .rec-with-run input:focus-visible,
-.takes summary:focus-visible,
 .take-download:focus-visible,
-.take-delete:focus-visible {
+.take-row .tool:focus-visible,
+.icon-btn:focus-visible {
   outline: 2px solid var(--rust);
   outline-offset: 2px;
 }
 
+@media (max-width: 720px) {
+  .recorder-clock { font-size: 20px; }
+  .recorder-panel[data-mode="playback"] .recorder-clock { font-size: 14px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .rec-dot { animation: none; }
+  .rec-dot,
+  .recorder-panel { animation: none; transition: none; }
 }
