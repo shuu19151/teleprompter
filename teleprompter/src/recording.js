@@ -8,6 +8,11 @@ const MIME_TYPES = [
   'audio/webm;codecs=opus',
 ]
 const RECORDER_TIMESLICE_MS = 1000
+const AUDIO_BITS_PER_SECOND = 192000
+// The Web Audio compressor already restores some level, so this explicit makeup
+// is trimmed until speech lands near -18 LUFS and encoded peaks stay under -0.5 dBFS.
+const VOICE_MAKEUP_DB = 2.2
+const VOICE_SAMPLE_RATE = 48000
 
 let dbPromise = null
 let database = null
@@ -261,15 +266,97 @@ function stopTracks(stream) {
   for (const track of stream.getTracks()) track.stop()
 }
 
+/** Mic constraints with the browser's own voice processing left off. */
+export function micAudioConstraints(deviceId) {
+  const audio = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    channelCount: { ideal: 2 },
+    sampleRate: { ideal: VOICE_SAMPLE_RATE },
+  }
+  if (deviceId) audio.deviceId = { exact: deviceId }
+  return audio
+}
+
+function cleanMicConstraints(audio) {
+  const base = micAudioConstraints()
+  if (!audio || audio === true || typeof audio !== 'object') return base
+  return {
+    ...base,
+    ...audio,
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+  }
+}
+
+function dbToGain(db) {
+  return 10 ** (db / 20)
+}
+
+function createVoiceContext() {
+  const Ctx = window.AudioContext || window.webkitAudioContext
+  if (!Ctx) return null
+  try {
+    return new Ctx({ sampleRate: VOICE_SAMPLE_RATE })
+  } catch {
+    try {
+      return new Ctx()
+    } catch {
+      return null
+    }
+  }
+}
+
+/**
+ * Highpass, a gentle compressor, makeup gain, then a fast limiter.
+ * The destination stream is what MediaRecorder and the waveform read.
+ */
+function buildVoiceGraph(ctx, rawStream) {
+  const source = ctx.createMediaStreamSource(rawStream)
+  const highpass = ctx.createBiquadFilter()
+  highpass.type = 'highpass'
+  highpass.frequency.value = 90
+  highpass.Q.value = 0.707
+  const compressor = ctx.createDynamicsCompressor()
+  compressor.threshold.value = -24
+  compressor.knee.value = 12
+  compressor.ratio.value = 3
+  compressor.attack.value = 0.005
+  compressor.release.value = 0.2
+  const makeup = ctx.createGain()
+  makeup.gain.value = dbToGain(VOICE_MAKEUP_DB)
+  const limiter = ctx.createDynamicsCompressor()
+  limiter.threshold.value = -2
+  limiter.knee.value = 0
+  limiter.ratio.value = 20
+  limiter.attack.value = 0.001
+  limiter.release.value = 0.05
+  const destination = ctx.createMediaStreamDestination()
+  source.connect(highpass)
+  highpass.connect(compressor)
+  compressor.connect(makeup)
+  makeup.connect(limiter)
+  limiter.connect(destination)
+  return {
+    nodes: [source, highpass, compressor, makeup, limiter, destination],
+    stream: destination.stream,
+  }
+}
+
 /**
  * One microphone capture. pause/resume follow MediaRecorder when the browser
- * provides them; stop() always releases the mic tracks.
+ * provides them; stop() always releases the mic tracks and the voice graph.
  * onError runs if the recorder fails or the mic track ends mid-take.
  * onStopped runs synchronously once stop() has a blob (or null).
  */
 export function createCapture({ onError, onStopped } = {}) {
   let phase = 'idle'
   let stream = null
+  let inputStream = null
+  let voiceCtx = null
+  let voiceGraph = null
   let recorder = null
   let chunks = []
   let mimeType = ''
@@ -278,6 +365,31 @@ export function createCapture({ onError, onStopped } = {}) {
   let segmentStart = 0
   let cancelStart = false
   let stopWait = null
+
+  function closeVoice() {
+    const graph = voiceGraph
+    voiceGraph = null
+    if (graph?.nodes) {
+      for (const node of graph.nodes) {
+        try {
+          node.disconnect()
+        } catch {
+          /* already disconnected */
+        }
+      }
+    }
+    const ctx = voiceCtx
+    voiceCtx = null
+    if (ctx && ctx.state !== 'closed') ctx.close().catch(() => {})
+  }
+
+  function releaseStreams() {
+    closeVoice()
+    stopTracks(inputStream)
+    if (stream && stream !== inputStream) stopTracks(stream)
+    inputStream = null
+    stream = null
+  }
 
   function elapsedMs() {
     if (phase === 'recording') return accumulated + (performance.now() - segmentStart)
@@ -292,7 +404,7 @@ export function createCapture({ onError, onStopped } = {}) {
     if (phase === 'starting') cancelStart = true
   }
 
-  async function start(audio) {
+  async function start(audio, { voiceEnhance = true } = {}) {
     if (phase !== 'idle') return { started: false }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') throw unsupportedError()
     const mime = pickMimeType()
@@ -303,14 +415,31 @@ export function createCapture({ onError, onStopped } = {}) {
     chunks = []
     mimeType = ''
     extension = 'webm'
-    let localStream = null
+    // Open the voice context in this turn so a click can start it.
+    if (voiceEnhance) voiceCtx = createVoiceContext()
+    let opened = null
     try {
-      const constraints = audio == null || audio === true ? true : audio
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: constraints })
+      const constraints = cleanMicConstraints(audio)
+      opened = await navigator.mediaDevices.getUserMedia({ audio: constraints })
       if (cancelStart || phase !== 'starting') return { started: false, cancelled: true }
-      recorder = mime ? new MediaRecorder(localStream, { mimeType: mime }) : new MediaRecorder(localStream)
-      stream = localStream
-      localStream = null
+      inputStream = opened
+      opened = null
+      let recordStream = inputStream
+      if (voiceCtx) {
+        try {
+          voiceGraph = buildVoiceGraph(voiceCtx, inputStream)
+          recordStream = voiceGraph.stream
+          if (voiceCtx.state === 'suspended') await voiceCtx.resume()
+        } catch {
+          closeVoice()
+          recordStream = inputStream
+        }
+      }
+      if (cancelStart || phase !== 'starting') return { started: false, cancelled: true }
+      const recorderOptions = { audioBitsPerSecond: AUDIO_BITS_PER_SECOND }
+      if (mime) recorderOptions.mimeType = mime
+      recorder = new MediaRecorder(recordStream, recorderOptions)
+      stream = recordStream
       mimeType = recorder.mimeType || mime || 'audio/webm'
       extension = extensionForMime(mimeType)
       recorder.addEventListener('dataavailable', (event) => {
@@ -320,7 +449,7 @@ export function createCapture({ onError, onStopped } = {}) {
       recorder.addEventListener('error', () => {
         if (phase === 'recording' || phase === 'paused') onError?.()
       })
-      for (const track of stream.getTracks()) {
+      for (const track of inputStream.getTracks()) {
         track.addEventListener('ended', () => {
           if (phase === 'recording' || phase === 'paused') onError?.()
         })
@@ -334,12 +463,9 @@ export function createCapture({ onError, onStopped } = {}) {
       throw error
     } finally {
       if (phase !== 'recording') {
-        stopTracks(localStream)
-        if (stream && phase !== 'recording') {
-          stopTracks(stream)
-          stream = null
-          recorder = null
-        }
+        stopTracks(opened)
+        releaseStreams()
+        recorder = null
         if (phase === 'starting') phase = 'idle'
       }
     }
@@ -386,8 +512,11 @@ export function createCapture({ onError, onStopped } = {}) {
             extension: extensionForMime(actualType),
           }
         : null
-    stopTracks(stream)
-    stream = null
+    try {
+      releaseStreams()
+    } catch {
+      /* the blob is already assembled */
+    }
     recorder = null
     phase = 'idle'
     accumulated = 0
