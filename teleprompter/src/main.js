@@ -116,12 +116,16 @@ function loadImports() {
   if (!Array.isArray(data)) return []
   return data
     .filter((item) => item && typeof item.id === 'string' && typeof item.title === 'string' && typeof item.body === 'string')
-    .map((item) => ({
-      id: item.id,
-      title: item.title,
-      body: item.body,
-      createdAt: typeof item.createdAt === 'string' || typeof item.createdAt === 'number' ? item.createdAt : new Date().toISOString(),
-    }))
+    .map((item) => {
+      const stored = {
+        id: item.id,
+        title: item.title,
+        body: item.body,
+        createdAt: typeof item.createdAt === 'string' || typeof item.createdAt === 'number' ? item.createdAt : new Date().toISOString(),
+      }
+      if (typeof item.updatedAt === 'string' || typeof item.updatedAt === 'number') stored.updatedAt = item.updatedAt
+      return stored
+    })
 }
 
 function writeImports(list) {
@@ -245,7 +249,7 @@ let imports = loadImports()
 let importFileName = ''
 let importMarkdown = false
 let importReturnFocus = null
-let renamingId = null
+let editingId = null
 
 const state = {
   index: 0,
@@ -301,6 +305,12 @@ function renderLines(body) {
     .split('\n')
     .map((line) => (line.trim() ? `<p class="line">${escapeHtml(line)}</p>` : '<div class="gap"></div>'))
     .join('')
+}
+
+function scriptLineCount(body) {
+  return String(body ?? '')
+    .split('\n')
+    .filter((line) => line.trim()).length
 }
 
 function measure() {
@@ -817,18 +827,6 @@ function renderImportList() {
   ul.innerHTML = list
     .map(({ item, reading }) => {
       const on = state.kind === 'import' && state.importId === item.id
-      if (renamingId === item.id) {
-        return `
-        <li>
-          <form class="rename-form" data-rename-form="${escapeAttr(item.id)}">
-            <label class="sr" for="rename-${escapeAttr(item.id)}">Rename</label>
-            <input id="rename-${escapeAttr(item.id)}" class="rename-input" type="text" maxlength="180" autocomplete="off" value="${escapeAttr(item.title)}" />
-            <button class="tool mini" type="submit">Save</button>
-            <button class="tool mini" type="button" data-cancel-rename>Cancel</button>
-          </form>
-          <p class="rename-error" role="alert" hidden></p>
-        </li>`
-      }
       return `
         <li class="import-row">
           <button class="essay ${on ? 'is-on' : ''}" type="button" data-import-id="${escapeAttr(item.id)}">
@@ -836,32 +834,17 @@ function renderImportList() {
             <span class="name">${escapeHtml(item.title)}</span>
           </button>
           <div class="import-tools">
-            <button class="tool mini" type="button" data-rename="${escapeAttr(item.id)}" aria-label="Rename ${escapeAttr(item.title)}">Rename</button>
+            <button class="tool mini" type="button" data-edit="${escapeAttr(item.id)}" aria-label="Edit ${escapeAttr(item.title)}">Edit</button>
             <button class="tool mini" type="button" data-delete="${escapeAttr(item.id)}" aria-label="Delete ${escapeAttr(item.title)}">Delete</button>
           </div>
         </li>`
     })
     .join('')
-  const input = ul.querySelector('.rename-input')
-  if (input && document.activeElement !== input) {
-    input.focus()
-    const end = input.value.length
-    input.setSelectionRange(end, end)
-  }
 }
 
 function renderList() {
   renderEssayList()
   renderImportList()
-}
-
-function syncHeading() {
-  const item = current()
-  if (!item) return
-  const heading = document.querySelector('.sheet h1')
-  const kicker = document.querySelector('.kicker')
-  if (heading) heading.textContent = item.title
-  if (kicker) kicker.textContent = `${item.code} · ${item.words} words · ${item.minutes} min`
 }
 
 function showDialogError(message) {
@@ -909,30 +892,82 @@ function addImport(raw, options) {
   return { item }
 }
 
-function commitRename(id, value) {
-  const title = clampTitle(value)
-  const error = document.querySelector('.rename-error')
-  if (!title) {
-    if (error) {
-      error.hidden = false
-      error.textContent = 'Enter a title.'
-    }
-    return
+function validateImportBody(raw, { fileName = '', markdown = false } = {}) {
+  if (typeof raw !== 'string') return { error: EMPTY_IMPORT_MESSAGE }
+  if (textBytes(raw) > MAX_IMPORT_BYTES) return { error: SIZE_IMPORT_MESSAGE }
+  let text = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  if (markdown || isMarkdownName(fileName)) text = stripMarkdownHeadings(text)
+  text = text.trim()
+  if (!text) return { error: EMPTY_IMPORT_MESSAGE }
+  return { text }
+}
+
+function fallbackTitle(text, fileName) {
+  const gap = text.indexOf('\n\n')
+  const titleBlock = gap === -1 ? text : text.slice(0, gap)
+  let finalTitle = ''
+  if (gap !== -1) finalTitle = titleCase(titleBlock)
+  else if (prettyFileName(fileName)) finalTitle = prettyFileName(fileName)
+  else {
+    const firstLine = text.split('\n').find((line) => line.trim())?.trim() ?? ''
+    finalTitle = firstLine ? titleCase(firstLine) : ''
   }
-  const next = imports.map((item) => (item.id === id ? { ...item, title } : item))
+  finalTitle = clampTitle(finalTitle)
+  if (!finalTitle) finalTitle = prettyFileName(fileName) || 'Untitled'
+  return finalTitle
+}
+
+function capturedReadingPlace() {
+  const index = activeIndex >= 0 ? activeIndex : anchor?.index ?? 0
+  const fraction = anchor && anchor.index === index && Number.isFinite(anchor.fraction) ? anchor.fraction : 0
+  return { index: Math.max(0, index), fraction }
+}
+
+function placeReading(index, fraction) {
+  anchor = { index, fraction, width: -1, height: -1 }
+}
+
+function updateImport(id, titleValue, bodyValue) {
+  const existing = imports.find((item) => item.id === id)
+  if (!existing) return { error: 'Could not save this text.' }
+  const validated = validateImportBody(bodyValue, { fileName: importFileName, markdown: importMarkdown })
+  if (validated.error) return validated
+  // An untouched textarea must round-trip the stored body exactly, even when
+  // normalization would otherwise rewrite whitespace.
+  const body = bodyValue === existing.body || validated.text === existing.body ? existing.body : validated.text
+  const title = clampTitle(titleValue) || fallbackTitle(body, importFileName)
+  const nextItem = {
+    id: existing.id,
+    title,
+    body,
+    createdAt: existing.createdAt,
+    updatedAt: new Date().toISOString(),
+  }
+  const next = imports.map((item) => (item.id === id ? nextItem : item))
   const saved = writeImports(next)
-  if (!saved.ok) {
-    showImportNote(saved.quota ? QUOTA_IMPORT_MESSAGE : 'Could not rename this text.')
-    return
-  }
+  if (!saved.ok) return { error: saved.quota ? QUOTA_IMPORT_MESSAGE : 'Could not save this text.' }
+  const bodyChanged = body !== existing.body
+  const place = capturedReadingPlace()
   imports = next
-  renamingId = null
   clearImportNote()
   renderImportList()
   if (state.kind === 'import' && state.importId === id) {
-    syncHeading()
+    if (bodyChanged) {
+      const lines = scriptLineCount(body)
+      if (lines <= 0) {
+        anchor = null
+        state.offset = 0
+      } else {
+        // Keep the current line index, clamped to the new script.
+        placeReading(Math.min(place.index, lines - 1), place.fraction)
+      }
+    } else {
+      placeReading(place.index, place.fraction)
+    }
+    renderSheet()
     saveProgressNow()
   }
+  return { item: nextItem }
 }
 
 function deleteImport(id) {
@@ -946,7 +981,6 @@ function deleteImport(id) {
     return
   }
   imports = next
-  if (renamingId === id) renamingId = null
   clearImportNote()
   if (state.kind === 'import' && state.importId === id) {
     if (essays.length) select(0)
@@ -968,16 +1002,44 @@ function deleteImport(id) {
   renderImportList()
 }
 
+function setDialogMode(mode) {
+  const heading = document.querySelector('#import-heading')
+  const save = document.querySelector('#import-save')
+  if (heading) heading.textContent = mode === 'edit' ? 'Edit text' : 'Import text'
+  if (save) save.textContent = mode === 'edit' ? 'Save' : 'Import'
+}
+
 function openImportDialog() {
   const dialog = document.querySelector('#import-dialog')
   if (!dialog || dialog.open) return
   importReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : document.querySelector('#import-open')
+  editingId = null
   importFileName = ''
   importMarkdown = false
   dialog.querySelector('form')?.reset()
   clearDialogError()
+  setDialogMode('import')
   dialog.showModal()
   dialog.querySelector('#import-name')?.focus()
+}
+
+function openEditDialog(id) {
+  const dialog = document.querySelector('#import-dialog')
+  const item = imports.find((entry) => entry.id === id)
+  if (!dialog || dialog.open || !item) return
+  importReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  editingId = item.id
+  importFileName = ''
+  importMarkdown = false
+  dialog.querySelector('form')?.reset()
+  clearDialogError()
+  const name = dialog.querySelector('#import-name')
+  const body = dialog.querySelector('#import-body')
+  if (name) name.value = item.title
+  if (body) body.value = item.body
+  setDialogMode('edit')
+  dialog.showModal()
+  name?.focus()
 }
 
 function dialogFocusables(dialog) {
@@ -1259,16 +1321,9 @@ function mount() {
   document.querySelector('#import-open').addEventListener('click', openImportDialog)
   const importList = document.querySelector('#import-list')
   importList.addEventListener('click', (event) => {
-    if (event.target.closest('[data-cancel-rename]')) {
-      renamingId = null
-      renderImportList()
-      return
-    }
-    const rename = event.target.closest('[data-rename]')
-    if (rename) {
-      renamingId = rename.dataset.rename
-      clearImportNote()
-      renderImportList()
+    const edit = event.target.closest('[data-edit]')
+    if (edit) {
+      openEditDialog(edit.dataset.edit)
       return
     }
     const del = event.target.closest('[data-delete]')
@@ -1279,22 +1334,15 @@ function mount() {
     const button = event.target.closest('[data-import-id]')
     if (button) selectImport(button.dataset.importId)
   })
-  importList.addEventListener('submit', (event) => {
-    const form = event.target.closest('[data-rename-form]')
-    if (!form) return
-    event.preventDefault()
-    commitRename(form.dataset.renameForm, form.querySelector('.rename-input')?.value ?? '')
-  })
-  importList.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && event.target.classList?.contains('rename-input')) {
-      event.stopPropagation()
-      renamingId = null
-      renderImportList()
-    }
-  })
   const dialog = document.querySelector('#import-dialog')
   const importForm = document.querySelector('#import-form')
   dialog.addEventListener('close', () => {
+    editingId = null
+    importFileName = ''
+    importMarkdown = false
+    dialog.querySelector('form')?.reset()
+    clearDialogError()
+    setDialogMode('import')
     const back = importReturnFocus
     importReturnFocus = null
     if (back?.isConnected) back.focus()
@@ -1328,13 +1376,16 @@ function mount() {
     event.preventDefault()
     const title = document.querySelector('#import-name')?.value ?? ''
     const body = document.querySelector('#import-body')?.value ?? ''
-    const result = addImport(body, { title, fileName: importFileName, markdown: importMarkdown })
+    const id = editingId
+    const result = id
+      ? updateImport(id, title, body)
+      : addImport(body, { title, fileName: importFileName, markdown: importMarkdown })
     if (result.error) {
       showDialogError(result.error)
       return
     }
     dialog.close()
-    selectImport(result.item.id)
+    if (!id) selectImport(result.item.id)
   })
   document.querySelector('#import-file')?.addEventListener('change', async (event) => {
     const input = event.target
