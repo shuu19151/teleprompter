@@ -27,7 +27,9 @@ Essays are plain text files in `essays/` at the repo root. The name is case-sens
 
 The first blank-line-separated block is the title. The rest is the script.
 
-The reload button next to Essays calls `/api/essays`. That route exists only on the Vite dev server, so the button is hidden in `build` and `preview`. On the dev server, press it to pick up a new file without restarting.
+The reload button next to Essays calls `/api/essays` until a folder is chosen. That route exists only on the Vite dev server, so the button is hidden in `build` and `preview`. On the dev server, press it to pick up a new file without restarting.
+
+Folder, the button beside Essays, opens the system folder dialog in Chrome and Edge. In another browser the button stays visible and explains that the dialog needs Chrome or Edge on http://127.0.0.1:5173. The app remembers the folder in this browser. Every file ending in `.txt`, in any letter case, that sits directly in the folder is listed. Subfolders are not read. Reload then reads that folder again, and the button stays available in a production build. Use app essays clears the choice and returns to the `essays/` files above. A cancelled dialog leaves the current list as it is. The next visit reads the folder when permission is already granted. When the browser needs a click before it can read, the sidebar asks you to press reload.
 
 ## Your own text
 
