@@ -17,15 +17,18 @@ import {
 } from './essay-folder.js'
 import {
   clampTitle,
+  EMPTY_IMPORT_MESSAGE,
   isMarkdownName,
   isQuotaError,
   isTextFileName,
   loadImports,
+  MAX_IMPORT_BYTES,
   newImportId,
   parseEssay,
   parseImportedText,
   prettyFileName,
   readTextFile,
+  SIZE_IMPORT_MESSAGE,
   textBytes,
   titleCase,
   writeImports,
@@ -74,9 +77,6 @@ const FONT_MAX = 56
 const FONT_DEFAULT = 32
 const READING_RATIO = 1 / 3
 const SAVE_DELAY = 300
-const MAX_IMPORT_BYTES = 200 * 1024
-const EMPTY_IMPORT_MESSAGE = 'Paste some text or choose a .txt or .md file.'
-const SIZE_IMPORT_MESSAGE = 'That text is larger than 200 KB.'
 const TYPE_IMPORT_MESSAGE = 'Choose a .txt or .md file.'
 const READ_IMPORT_MESSAGE = 'Could not read that file.'
 const QUOTA_IMPORT_MESSAGE = 'Could not save this text because browser storage is full.'
