@@ -1896,6 +1896,10 @@ document.addEventListener('fullscreenchange', () => {
   setFullscreenMode(!!frame && document.fullscreenElement === frame)
 })
 
+document.addEventListener('contextmenu', (event) => {
+  event.preventDefault()
+})
+
 function isTypingTarget(target) {
   return (
     target instanceof HTMLTextAreaElement ||
