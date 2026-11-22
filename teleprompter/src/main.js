@@ -9,6 +9,7 @@ import {
   addTake,
   createCapture,
   describeMediaError,
+  micAudioConstraints,
   formatClock,
   formatFine,
   isQuotaError as isIdbQuotaError,
@@ -28,6 +29,7 @@ const FONT_KEY = 'teleprompter:fontSize'
 const IMPORTS_KEY = 'teleprompter:imports'
 const REC_WITH_RUN_KEY = 'teleprompter:recWithRun'
 const MIC_KEY = 'teleprompter:micId'
+const VOICE_KEY = 'teleprompter:voiceEnhance'
 const QUOTA_TAKE_MESSAGE = 'Could not save this take because browser storage is full.'
 const SAVE_TAKE_MESSAGE = 'Could not save this take.'
 const DELETE_TAKE_MESSAGE = 'Could not delete this take.'
@@ -321,6 +323,7 @@ let takesToken = 0
 let panelMode = 'closed'
 let manualHold = false
 let micId = loadMicId()
+let voiceEnhance = loadVoiceEnhance()
 let audioInputs = []
 let micListToken = 0
 let openAfterSave = true
@@ -807,7 +810,13 @@ function closeAudioGraph() {
 function ensureAudioContext() {
   const Ctx = window.AudioContext || window.webkitAudioContext
   if (!Ctx) return null
-  if (!audioCtx || audioCtx.state === 'closed') audioCtx = new Ctx()
+  if (!audioCtx || audioCtx.state === 'closed') {
+    try {
+      audioCtx = new Ctx({ sampleRate: 48000 })
+    } catch {
+      audioCtx = new Ctx()
+    }
+  }
   if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {})
   return audioCtx
 }
@@ -841,6 +850,12 @@ function loadMicId() {
   }
 }
 
+function loadVoiceEnhance() {
+  const saved = loadJSON(VOICE_KEY)
+  if (typeof saved === 'boolean') return saved
+  return true
+}
+
 function saveMicId(id) {
   micId = id || ''
   try {
@@ -861,6 +876,7 @@ function syncMicControls() {
   if (row) row.hidden = panelOpen
   const busy = panelMode === 'recording' || recordingBusy()
   for (const select of document.querySelectorAll('select.mic-select')) select.disabled = busy
+  for (const input of document.querySelectorAll('input.voice-enhance-input')) input.disabled = busy
 }
 
 function micOptions() {
@@ -925,10 +941,10 @@ function onMicChange(event) {
   renderMicSelects()
 }
 
-function micConstraint() {
-  if (!micId) return true
-  if (audioInputs.length && !audioInputs.some((device) => device.deviceId === micId)) return true
-  return { deviceId: { exact: micId } }
+function chosenMicId() {
+  if (!micId) return ''
+  if (audioInputs.length && !audioInputs.some((device) => device.deviceId === micId)) return ''
+  return micId
 }
 
 function isMissingMicError(error) {
@@ -936,15 +952,26 @@ function isMissingMicError(error) {
   return name === 'OverconstrainedError' || name === 'NotFoundError' || name === 'DevicesNotFoundError'
 }
 
+function syncVoiceEnhanceInputs() {
+  for (const input of document.querySelectorAll('input.voice-enhance-input')) input.checked = voiceEnhance
+}
+
+function onVoiceEnhanceChange(event) {
+  voiceEnhance = Boolean(event.target.checked)
+  writeStorage(VOICE_KEY, JSON.stringify(voiceEnhance))
+  syncVoiceEnhanceInputs()
+}
+
 async function openCapture() {
-  const constraint = micConstraint()
+  const deviceId = chosenMicId()
+  const enhance = voiceEnhance
   try {
-    return await capture.start(constraint)
+    return await capture.start(micAudioConstraints(deviceId), { voiceEnhance: enhance })
   } catch (error) {
-    if (constraint !== true && isMissingMicError(error)) {
+    if (deviceId && isMissingMicError(error)) {
       saveMicId('')
       renderMicSelects()
-      return capture.start(true)
+      return capture.start(micAudioConstraints(''), { voiceEnhance: enhance })
     }
     throw error
   }
@@ -1719,6 +1746,10 @@ function onTakesClick(event) {
   if (Number.isInteger(id)) void playShownTake(id)
 }
 
+function voiceEnhanceControl(id) {
+  return `<label class="voice-enhance"><input class="voice-enhance-input" id="${id}" type="checkbox" ${voiceEnhance ? 'checked' : ''} />Voice enhance</label>`
+}
+
 function recorderPanelHtml() {
   return `
     <div class="recorder-panel" id="recorder-panel" data-mode="closed" aria-hidden="true" inert>
@@ -1736,6 +1767,7 @@ function recorderPanelHtml() {
           <div class="recorder-bar">
             <div class="recorder-mic">
               <select class="mic-select" id="recorder-mic" aria-label="Microphone"></select>
+              ${voiceEnhanceControl('voice-enhance-panel')}
             </div>
             <p class="recorder-clock" id="recorder-clock">00:00.00</p>
             <div class="recorder-actions">
@@ -2329,6 +2361,8 @@ function bindSheet() {
   document.querySelector('#rec-with-run')?.addEventListener('change', onRecWithRunChange)
   document.querySelector('#mic-idle')?.addEventListener('change', onMicChange)
   document.querySelector('#recorder-mic')?.addEventListener('change', onMicChange)
+  document.querySelector('#voice-enhance')?.addEventListener('change', onVoiceEnhanceChange)
+  document.querySelector('#voice-enhance-panel')?.addEventListener('change', onVoiceEnhanceChange)
   renderMicSelects()
   document.querySelector('#recorder-stop')?.addEventListener('click', () => {
     void finishRecording()
@@ -2416,6 +2450,7 @@ function renderSheet() {
       <div class="mic-row" id="mic-row">
         ${MIC_ICON}
         <select class="mic-select" id="mic-idle" aria-label="Microphone"></select>
+        ${voiceEnhanceControl('voice-enhance')}
       </div>
       <div class="stage-frame" id="stage-frame">
       ${recorderPanelHtml()}
@@ -2788,7 +2823,7 @@ function isTypingTarget(target) {
     target instanceof HTMLTextAreaElement ||
     target instanceof HTMLSelectElement ||
     target.isContentEditable ||
-    (target instanceof HTMLInputElement && ['search', 'text'].includes(target.type))
+    (target instanceof HTMLInputElement && ['search', 'text', 'checkbox'].includes(target.type))
   )
 }
 
