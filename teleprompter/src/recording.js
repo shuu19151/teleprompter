@@ -72,7 +72,8 @@ export function waveformPeaks(audioBuffer, bars) {
     let n = 0
     for (let channel = 0; channel < channels; channel += 1) {
       const data = audioBuffer.getChannelData(channel)
-      for (let j = start; j < end; j += 1) {
+      const stride = Math.max(1, Math.floor((end - start) / 48))
+      for (let j = start; j < end; j += stride) {
         const value = data[j]
         const abs = value < 0 ? -value : value
         if (abs > peak) peak = abs
