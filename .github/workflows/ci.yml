@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: teleprompter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: teleprompter/package-lock.json
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:all
+      - run: npm run build
+      - name: Production bundle excludes the test hook
+        run: |
+          if grep -R -F -q --include='*.js' --include='*.html' --include='*.css' '__teleprompterTest' dist; then
+            echo 'production bundle contains __teleprompterTest' >&2
+            exit 1
+          fi
