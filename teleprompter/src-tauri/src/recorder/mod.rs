@@ -1,26 +1,27 @@
 //! Native take recorder.
 //!
 //! `recorder_start` opens the default input, pushes mono samples through a
-//! lock-free ring, and a writer thread stores a 48 kHz PCM WAV. The page does
-//! not call these commands yet.
+//! lock-free ring, and a writer thread stores a 48 kHz PCM WAV. That thread
+//! also emits meter and peak events. The capture callback never emits.
 
 mod capture;
 mod device;
 mod events;
+mod levels;
 mod wav;
 mod writer;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 pub use events::RecorderPhase;
 
-use events::StateEvent;
+use events::{ErrorEvent, RecorderEmit, StateEvent, StateNotice};
 
 /// File sample rate. Device audio at another rate is resampled on the writer thread.
 pub const OUTPUT_SAMPLE_RATE: u32 = 48_000;
@@ -88,6 +89,7 @@ pub struct StopResponse {
   pub duration_ms: u64,
   pub bytes: u64,
   pub dropped_samples: u64,
+  pub peaks: Vec<f32>,
 }
 
 pub struct RecorderState {
@@ -130,6 +132,7 @@ impl RecorderInner {
     &mut self,
     sessions_root: &Path,
     text_key: String,
+    emit: Arc<dyn RecorderEmit>,
   ) -> Result<StartResponse, RecorderError> {
     if self.active.is_some() {
       return Err(RecorderError::AlreadyRecording);
@@ -141,12 +144,15 @@ impl RecorderInner {
     let (producer, consumer) = rtrb::RingBuffer::new(capture::ring_capacity(capture_rate));
     let dropped = Arc::new(AtomicU64::new(0));
     let written = Arc::new(AtomicU64::new(0));
+    let fault = Arc::new(AtomicBool::new(false));
     let writer = match writer::spawn_writer(
       consumer,
       Arc::clone(&dropped),
       prepared.wav_path.clone(),
       capture_rate,
       Arc::clone(&written),
+      Arc::clone(&emit),
+      Arc::clone(&fault),
     ) {
       Ok(writer) => writer,
       Err(error) => {
@@ -154,7 +160,7 @@ impl RecorderInner {
         return Err(error);
       }
     };
-    let stream = match capture::start_input(opened, producer, dropped) {
+    let stream = match capture::start_input(opened, producer, dropped, fault) {
       Ok(stream) => stream,
       Err(error) => {
         drop(writer);
@@ -162,7 +168,13 @@ impl RecorderInner {
         return Err(error);
       }
     };
-    self.activate(prepared, capture::CapturePump::from_stream(stream), writer, written)
+    self.activate(
+      prepared,
+      capture::CapturePump::from_stream(stream),
+      writer,
+      written,
+      emit,
+    )
   }
 
   pub fn stop(&mut self) -> Result<StopResponse, RecorderError> {
@@ -181,6 +193,7 @@ impl RecorderInner {
     capture: capture::CapturePump,
     writer: writer::WriterHandle,
     written: Arc<AtomicU64>,
+    emit: Arc<dyn RecorderEmit>,
   ) -> Result<StartResponse, RecorderError> {
     if self.active.is_some() {
       drop(capture);
@@ -202,7 +215,14 @@ impl RecorderInner {
       capture,
       writer,
       written,
+      emit,
     });
+    if let Some(session) = self.active.as_ref() {
+      session.emit.state(&StateNotice {
+        state: RecorderPhase::Recording,
+        duration_ms: 0,
+      });
+    }
     Ok(response)
   }
 }
@@ -225,36 +245,59 @@ struct ActiveSession {
   capture: capture::CapturePump,
   writer: writer::WriterHandle,
   written: Arc<AtomicU64>,
+  emit: Arc<dyn RecorderEmit>,
 }
 
 impl ActiveSession {
   fn finish(mut self) -> Result<StopResponse, RecorderError> {
     self.capture.stop();
-    let done = self.writer.finish()?;
-    write_session(
-      &self.directory,
-      &self.started_at,
-      &self.text_key,
-      &self.device_name,
-      "stopped",
-    )?;
-    Ok(StopResponse {
-      path: path_string(&self.wav_path),
-      duration_ms: duration_ms(done.frames),
-      bytes: done.bytes,
-      dropped_samples: done.dropped_samples,
-    })
+    let result = match self.writer.finish() {
+      Ok(done) => match write_session(
+        &self.directory,
+        &self.started_at,
+        &self.text_key,
+        &self.device_name,
+        "stopped",
+      ) {
+        Ok(()) => Ok(StopResponse {
+          path: path_string(&self.wav_path),
+          duration_ms: duration_ms(done.frames),
+          bytes: done.bytes,
+          dropped_samples: done.dropped_samples,
+          peaks: done.peaks,
+        }),
+        Err(error) => {
+          self.emit.error(&ErrorEvent::from_recorder(&error));
+          Err(error)
+        }
+      },
+      Err(error) => Err(error),
+    };
+    let duration_ms = result.as_ref().map(|stopped| stopped.duration_ms).unwrap_or(0);
+    self.emit.state(&StateNotice {
+      state: RecorderPhase::Idle,
+      duration_ms,
+    });
+    result
   }
 
   fn discard(mut self) -> Result<(), RecorderError> {
     self.capture.stop();
     let _ = self.writer.finish();
-    fs::remove_dir_all(&self.directory).map_err(|error| {
+    let removed = fs::remove_dir_all(&self.directory).map_err(|error| {
       RecorderError::Session(format!(
         "could not delete {}: {error}",
         self.directory.display()
       ))
-    })
+    });
+    if let Err(error) = &removed {
+      self.emit.error(&ErrorEvent::from_recorder(error));
+    }
+    self.emit.state(&StateNotice {
+      state: RecorderPhase::Idle,
+      duration_ms: 0,
+    });
+    removed
   }
 }
 
@@ -341,6 +384,33 @@ fn lock(state: &RecorderState) -> Result<MutexGuard<'_, RecorderInner>, Recorder
     .map_err(|_| RecorderError::Session("the recorder lock was poisoned".into()))
 }
 
+struct AppEmit(AppHandle);
+
+impl RecorderEmit for AppEmit {
+  fn meter(&self, event: &events::MeterEvent) {
+    let _ = self.0.emit("recorder://meter", event.clone());
+  }
+
+  fn peaks(&self, event: &events::PeaksEvent) {
+    let _ = self.0.emit("recorder://peaks", event.clone());
+  }
+
+  fn state(&self, event: &StateNotice) {
+    let _ = self.0.emit("recorder://state", event.clone());
+  }
+
+  fn error(&self, event: &ErrorEvent) {
+    let _ = self.0.emit("recorder://error", event.clone());
+  }
+}
+
+fn report_start_error(emit: &dyn RecorderEmit, error: &RecorderError) {
+  if matches!(error, RecorderError::AlreadyRecording) {
+    return;
+  }
+  emit.error(&ErrorEvent::from_recorder(error));
+}
+
 #[tauri::command(async)]
 pub fn recorder_start(
   app: AppHandle,
@@ -348,7 +418,15 @@ pub fn recorder_start(
   text_key: String,
 ) -> Result<StartResponse, RecorderError> {
   let root = sessions_root(&app)?;
-  lock(&state)?.start_with_device(&root, text_key)
+  let emit = Arc::new(AppEmit(app));
+  match lock(&state)?.start_with_device(&root, text_key, Arc::clone(&emit) as Arc<dyn RecorderEmit>)
+  {
+    Ok(response) => Ok(response),
+    Err(error) => {
+      report_start_error(emit.as_ref(), &error);
+      Err(error)
+    }
+  }
 }
 
 #[tauri::command(async)]
@@ -466,6 +544,7 @@ mod tests {
     assert_eq!(stopped.dropped_samples, 6);
     assert_eq!(stopped.duration_ms, duration_ms(4));
     assert_eq!(stopped.bytes, 44 + 8);
+    assert_eq!(stopped.peaks.len(), 1);
     assert_eq!(stopped.path, path_string(&session_path.join(TAKE_FILE)));
     let after: serde_json::Value =
       serde_json::from_slice(&fs::read(session_path.join(SESSION_FILE)).unwrap()).unwrap();
@@ -492,12 +571,62 @@ mod tests {
     ));
   }
 
+  #[test]
+  fn stop_returns_peaks_and_emits_state_around_the_take() {
+    let dir = scratch_dir();
+    let emit = Arc::new(MemoryEmit::default());
+    let mut recorder = RecorderInner::new();
+    let samples = vec![0.25f32; 4_800];
+    recorder
+      .start_prefilled_with(
+        dir.path(),
+        "E01",
+        &samples,
+        samples.len(),
+        Arc::clone(&emit) as Arc<dyn RecorderEmit>,
+      )
+      .unwrap();
+    let stopped = recorder.stop().unwrap();
+    assert_eq!(stopped.peaks.len(), 5);
+    for value in &stopped.peaks {
+      assert!((value - 0.625).abs() < 1.0e-5, "peak {value}");
+    }
+    let states = emit.states.lock().unwrap();
+    assert_eq!(states.len(), 2);
+    assert_eq!(states[0].state, RecorderPhase::Recording);
+    assert_eq!(states[0].duration_ms, 0);
+    assert_eq!(states[1].state, RecorderPhase::Idle);
+    assert_eq!(states[1].duration_ms, stopped.duration_ms);
+    let meters = emit.meters.lock().unwrap();
+    let peaks = emit.peaks.lock().unwrap();
+    assert_eq!(meters.len(), 2);
+    assert_eq!(peaks.len(), 2);
+    assert_eq!(peaks[0].start_index, 0);
+    assert_eq!(peaks[1].start_index, 2);
+    assert!(emit.errors.lock().unwrap().is_empty());
+  }
+
   impl RecorderInner {
     fn start_sine(
       &mut self,
       sessions_root: &Path,
       text_key: &str,
       capture_rate: u32,
+    ) -> Result<StartResponse, RecorderError> {
+      self.start_sine_with(
+        sessions_root,
+        text_key,
+        capture_rate,
+        Arc::new(events::NopEmit),
+      )
+    }
+
+    fn start_sine_with(
+      &mut self,
+      sessions_root: &Path,
+      text_key: &str,
+      capture_rate: u32,
+      emit: Arc<dyn RecorderEmit>,
     ) -> Result<StartResponse, RecorderError> {
       if self.active.is_some() {
         return Err(RecorderError::AlreadyRecording);
@@ -506,15 +635,18 @@ mod tests {
       let (producer, consumer) = rtrb::RingBuffer::new(capture::ring_capacity(capture_rate));
       let dropped = Arc::new(AtomicU64::new(0));
       let written = Arc::new(AtomicU64::new(0));
+      let fault = Arc::new(AtomicBool::new(false));
       let writer = writer::spawn_writer(
         consumer,
         dropped,
         prepared.wav_path.clone(),
         capture_rate,
         Arc::clone(&written),
+        Arc::clone(&emit),
+        fault,
       )?;
       let capture = capture::CapturePump::from_sine(producer, capture_rate);
-      self.activate(prepared, capture, writer, written)
+      self.activate(prepared, capture, writer, written, emit)
     }
 
     fn start_prefilled(
@@ -523,6 +655,23 @@ mod tests {
       text_key: &str,
       samples: &[f32],
       capacity: usize,
+    ) -> Result<StartResponse, RecorderError> {
+      self.start_prefilled_with(
+        sessions_root,
+        text_key,
+        samples,
+        capacity,
+        Arc::new(events::NopEmit),
+      )
+    }
+
+    fn start_prefilled_with(
+      &mut self,
+      sessions_root: &Path,
+      text_key: &str,
+      samples: &[f32],
+      capacity: usize,
+      emit: Arc<dyn RecorderEmit>,
     ) -> Result<StartResponse, RecorderError> {
       if self.active.is_some() {
         return Err(RecorderError::AlreadyRecording);
@@ -533,19 +682,49 @@ mod tests {
       capture::push_frames(samples, 1, &mut producer, &dropped, capture::f32_sample);
       drop(producer);
       let written = Arc::new(AtomicU64::new(0));
+      let fault = Arc::new(AtomicBool::new(false));
       let writer = writer::spawn_writer(
         consumer,
         dropped,
         prepared.wav_path.clone(),
         OUTPUT_SAMPLE_RATE,
         Arc::clone(&written),
+        Arc::clone(&emit),
+        fault,
       )?;
       self.activate(
         prepared,
         capture::CapturePump::already_stopped(),
         writer,
         written,
+        emit,
       )
+    }
+  }
+
+  #[derive(Default)]
+  struct MemoryEmit {
+    meters: Mutex<Vec<events::MeterEvent>>,
+    peaks: Mutex<Vec<events::PeaksEvent>>,
+    states: Mutex<Vec<StateNotice>>,
+    errors: Mutex<Vec<ErrorEvent>>,
+  }
+
+  impl RecorderEmit for MemoryEmit {
+    fn meter(&self, event: &events::MeterEvent) {
+      self.meters.lock().unwrap().push(event.clone());
+    }
+
+    fn peaks(&self, event: &events::PeaksEvent) {
+      self.peaks.lock().unwrap().push(event.clone());
+    }
+
+    fn state(&self, event: &StateNotice) {
+      self.states.lock().unwrap().push(event.clone());
+    }
+
+    fn error(&self, event: &ErrorEvent) {
+      self.errors.lock().unwrap().push(event.clone());
     }
   }
 
