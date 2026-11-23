@@ -12,6 +12,10 @@ const RECORDER_EVENTS = [
   ['recorder://error', 'onError'],
 ]
 
+export function listDevices() {
+  return invoke('recorder_list_devices')
+}
+
 export function createNativeRecorder(handlers = {}) {
   let unlistens = []
 
@@ -40,10 +44,13 @@ export function createNativeRecorder(handlers = {}) {
   }
 
   return {
-    async start(textKey) {
+    async start(textKey, options = {}) {
       await subscribe()
+      const args = { textKey }
+      if (options.deviceId) args.deviceId = options.deviceId
+      if (Number.isInteger(options.channel) && options.channel >= 0) args.channel = options.channel
       try {
-        return await invoke('recorder_start', { textKey })
+        return await invoke('recorder_start', args)
       } catch (error) {
         await unsubscribe()
         throw error

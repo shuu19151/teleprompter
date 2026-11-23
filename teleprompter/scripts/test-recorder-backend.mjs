@@ -59,6 +59,8 @@ test('a native start error keeps the microphone messages the page already shows'
   assert.equal(nativeStartError(raw).name, 'NotFoundError')
   assert.equal(nativeStartError('{"code":"unsupported_format","message":"x"}').name, 'NotSupportedError')
   assert.equal(nativeStartError('{"code":"capture","message":"x"}').name, 'NotReadableError')
+  assert.equal(nativeStartError('{"code":"device_missing","message":"x"}').name, 'NotFoundError')
+  assert.equal(nativeStartError('{"code":"invalid_channel","message":"x"}').name, 'NotSupportedError')
   assert.equal(nativeStartError('nope').name, 'AbortError')
 })
 
@@ -151,6 +153,35 @@ test('the native backend feeds the waveform and does not build an m4a blob', asy
   assert.match(logs.join('\n'), /take\.wav/)
   assert.match(logs.join('\n'), /3 peaks/)
   assert.equal(stoppedTake.peaks.length, 3)
+})
+
+test('native start forwards the selected microphone and channel', async () => {
+  let seen = null
+  const backend = createNativeCapture({
+    armWave() {},
+    disarmWave() {},
+    getTextKey() {
+      return 'E01'
+    },
+    createClient() {
+      return {
+        async start(textKey, options) {
+          seen = { textKey, options }
+          return { sessionId: 'sess-1', sampleRate: 48000 }
+        },
+        async stop() {
+          return null
+        },
+        async cancel() {},
+      }
+    },
+  })
+  const started = await backend.start({ deviceId: { exact: 'ignored' } }, { deviceId: 'wasapi:{usb}', channel: 0 })
+  assert.equal(started.started, true)
+  assert.deepEqual(seen, {
+    textKey: 'E01',
+    options: { deviceId: 'wasapi:{usb}', channel: 0 },
+  })
 })
 
 test('a native start failure disarms the waveform and stays idle', async () => {

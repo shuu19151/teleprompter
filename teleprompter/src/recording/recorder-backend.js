@@ -56,8 +56,10 @@ export function nativeStartError(error) {
   const wrapped = new Error(parsed?.message || 'Could not start recording.')
   switch (parsed?.code) {
     case 'no_device':
+    case 'device_missing':
       wrapped.name = 'NotFoundError'
       break
+    case 'invalid_channel':
     case 'unsupported_format':
       wrapped.name = 'NotSupportedError'
       break
@@ -129,7 +131,7 @@ export function createNativeCapture({
     if (phase === 'starting') cancelStart = true
   }
 
-  async function start() {
+  async function start(_audio, options = {}) {
     if (phase !== 'idle') return { started: false }
     phase = 'starting'
     cancelStart = false
@@ -138,7 +140,9 @@ export function createNativeCapture({
     armWave?.(NATIVE_PEAK_STEP_MS)
     try {
       const textKey = getTextKey?.() || ''
-      await native.start(textKey)
+      const deviceId = typeof options.deviceId === 'string' ? options.deviceId : ''
+      const channel = Number.isInteger(options.channel) ? options.channel : undefined
+      await native.start(textKey, { deviceId, channel })
       if (cancelStart || phase !== 'starting') {
         phase = 'idle'
         disarm()

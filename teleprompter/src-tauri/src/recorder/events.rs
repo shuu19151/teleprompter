@@ -1,11 +1,15 @@
 //! Payloads the recorder can emit.
 //!
 //! The writer thread publishes meters and peaks. Start and stop publish the
-//! coarse state. The capture callback does not emit; it only raises an atomic
-//! the writer turns into [`ErrorEvent`].
+//! coarse state. A lost microphone publishes [`DeviceLostEvent`] from the
+//! writer thread or the device watcher, never from the cpal callback. The
+//! callback only raises an atomic.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
+use super::device::InputDevice;
 use super::RecorderError;
 
 /// Coarse recorder state. Pause and segmented takes extend this later.
@@ -58,6 +62,21 @@ pub struct ErrorEvent {
   pub message: String,
 }
 
+/// `recorder://device-lost`. The take has been stopped and the WAV finalized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceLostEvent {
+  pub device_id: String,
+}
+
+/// `recorder://devices-changed`. Emitted while idle when the input list or the
+/// default device changes. `devices` is the same shape as `recorder_list_devices`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicesChangedEvent {
+  pub devices: Vec<InputDevice>,
+}
+
 impl ErrorEvent {
   pub fn from_recorder(error: &RecorderError) -> Self {
     Self {
@@ -81,6 +100,18 @@ pub trait RecorderEmit: Send + Sync {
   fn peaks(&self, event: &PeaksEvent);
   fn state(&self, event: &StateNotice);
   fn error(&self, event: &ErrorEvent);
+  fn device_lost(&self, event: &DeviceLostEvent);
+  fn devices_changed(&self, event: &DevicesChangedEvent);
+}
+
+/// Emit `recorder://device-lost` once. The writer and the watcher share `notified`.
+pub fn notify_device_lost(emit: &dyn RecorderEmit, notified: &AtomicBool, device_id: &str) {
+  if notified.swap(true, Ordering::AcqRel) {
+    return;
+  }
+  emit.device_lost(&DeviceLostEvent {
+    device_id: device_id.to_string(),
+  });
 }
 
 #[cfg(test)]
@@ -92,6 +123,8 @@ impl RecorderEmit for NopEmit {
   fn peaks(&self, _event: &PeaksEvent) {}
   fn state(&self, _event: &StateNotice) {}
   fn error(&self, _event: &ErrorEvent) {}
+  fn device_lost(&self, _event: &DeviceLostEvent) {}
+  fn devices_changed(&self, _event: &DevicesChangedEvent) {}
 }
 
 #[cfg(test)]
@@ -130,5 +163,12 @@ mod tests {
     let error = serde_json::to_value(ErrorEvent::capture_fault()).unwrap();
     assert_eq!(error["code"], "capture");
     assert_eq!(error["message"], "the microphone stream failed");
+
+    let lost = serde_json::to_value(DeviceLostEvent {
+      device_id: "wasapi:{usb}".into(),
+    })
+    .unwrap();
+    assert_eq!(lost["deviceId"], "wasapi:{usb}");
+    assert!(lost.get("device_id").is_none());
   }
 }
