@@ -5,10 +5,9 @@ import '@fontsource/literata/latin-400.css'
 import '@fontsource/literata/latin-700.css'
 import './style.css'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { isEssayFile } from './library/essay-files.js'
+import { loadBundledEssays } from './library/bundled-essays.js'
 import { inTauri } from './library/essay-folder.js'
 import { createImportDialog } from './library/import-dialog.js'
-import { parseEssay } from './library/import-store.js'
 import { createLibrary } from './library/library-controller.js'
 import { createSidebar, stageEmptyMessage } from './library/sidebar-view.js'
 import { createReaderController } from './reading/reader-controller.js'
@@ -24,17 +23,7 @@ import { bindThemeToggle, readThemeStorage, theme } from './shell/theme.js'
 import { escapeAttr, escapeHtml } from './shared/html.js'
 import { loadJSON, readStorage, writeStorage } from './shared/storage.js'
 
-// Case-sensitive E*.txt, matching isEssayFile and /api/essays.
-const files = import.meta.glob('../../essays/E*.txt', { query: '?raw', import: 'default', eager: true })
-
-function essaysFromGlob() {
-  return Object.entries(files)
-    .filter(([path]) => isEssayFile(path))
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([path, raw]) => parseEssay(path, raw))
-}
-
-const bundledEssays = essaysFromGlob()
+const bundledEssays = loadBundledEssays()
 
 const confirmDialog = createConfirmDialog()
 
