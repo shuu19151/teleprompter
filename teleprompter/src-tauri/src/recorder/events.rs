@@ -1,9 +1,10 @@
 //! Payloads the recorder can emit.
 //!
-//! The writer thread publishes meters and peaks. Start and stop publish the
-//! coarse state. A lost microphone publishes [`DeviceLostEvent`] from the
-//! writer thread or the device watcher, never from the cpal callback. The
-//! callback only raises an atomic.
+//! The writer thread publishes meters and peaks. Start, pause, resume, and
+//! stop publish the coarse state. While a take is paused the writer does not
+//! publish meters or peaks. A lost microphone publishes [`DeviceLostEvent`]
+//! from the writer thread or the device watcher, never from the cpal callback.
+//! The callback only raises an atomic.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -12,12 +13,14 @@ use serde::{Deserialize, Serialize};
 use super::device::InputDevice;
 use super::RecorderError;
 
-/// Coarse recorder state. Pause and segmented takes extend this later.
+/// Coarse recorder state. `Paused` is a take that is still open and is not
+/// writing audio. Segment rotation on a timer is a later phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RecorderPhase {
   Idle,
   Recording,
+  Paused,
 }
 
 /// Status command payload. `session_id` is absent while the recorder is idle.
@@ -29,7 +32,7 @@ pub struct StateEvent {
   pub session_id: Option<String>,
 }
 
-/// `recorder://state`. Sent when a take starts, stops, or is cancelled.
+/// `recorder://state`. Sent when a take starts, pauses, resumes, stops, or is cancelled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StateNotice {
@@ -159,6 +162,14 @@ mod tests {
     assert_eq!(state["state"], "recording");
     assert_eq!(state["durationMs"], 20);
     assert!(state.get("sessionId").is_none());
+
+    let paused = serde_json::to_value(StateNotice {
+      state: RecorderPhase::Paused,
+      duration_ms: 1500,
+    })
+    .unwrap();
+    assert_eq!(paused["state"], "paused");
+    assert_eq!(paused["durationMs"], 1500);
 
     let error = serde_json::to_value(ErrorEvent::capture_fault()).unwrap();
     assert_eq!(error["code"], "capture");

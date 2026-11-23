@@ -3,9 +3,17 @@
 //! Pops mono `f32` frames from the ring, resamples to 48 kHz when the device
 //! rate is different, and writes PCM. Resampling, peak folds, and event
 //! emission all happen on this thread. The capture callback never calls it.
+//!
+//! While the take is paused this thread still pops, and it drops what it pops.
+//! That keeps the ring from filling, so the callback stays non-blocking. Those
+//! discarded frames are not ring overflows. Meter and peak events stop for the
+//! pause; the partial window is flushed into the segment being closed. Resume
+//! opens a new file and does not trim leading zeros. That trim is only for the
+//! silence a device can emit when the stream first opens.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -34,16 +42,48 @@ pub struct WriterDone {
   pub frames: u64,
   pub bytes: u64,
   pub dropped_samples: u64,
+  /// Frames popped and discarded while the take was paused. The ring overflow
+  /// counter stays in `dropped_samples`. Tests read this; stop does not return it.
+  #[allow(dead_code)]
+  pub paused_samples: u64,
   pub peaks: Vec<f32>,
+}
+
+enum WriterCommand {
+  Pause(Sender<Result<(), RecorderError>>),
+  Resume(PathBuf, Sender<Result<(), RecorderError>>),
 }
 
 pub struct WriterHandle {
   stop: Arc<AtomicBool>,
+  commands: Sender<WriterCommand>,
   join: Option<JoinHandle<Result<WriterDone, RecorderError>>>,
   emit: Arc<dyn RecorderEmit>,
 }
 
 impl WriterHandle {
+  pub fn pause(&self) -> Result<(), RecorderError> {
+    self.round_trip(WriterCommand::Pause)
+  }
+
+  pub fn resume(&self, path: PathBuf) -> Result<(), RecorderError> {
+    self.round_trip(|reply| WriterCommand::Resume(path, reply))
+  }
+
+  fn round_trip(
+    &self,
+    command: impl FnOnce(Sender<Result<(), RecorderError>>) -> WriterCommand,
+  ) -> Result<(), RecorderError> {
+    let (sender, receiver) = mpsc::channel();
+    self
+      .commands
+      .send(command(sender))
+      .map_err(|_| RecorderError::Write("the writer thread has stopped".into()))?;
+    receiver
+      .recv()
+      .map_err(|_| RecorderError::Write("the writer thread has stopped".into()))?
+  }
+
   pub fn finish(mut self) -> Result<WriterDone, RecorderError> {
     self.stop.store(true, Ordering::Release);
     let join = self
@@ -86,6 +126,7 @@ pub fn spawn_writer(
   let stop = Arc::new(AtomicBool::new(false));
   let stop_flag = Arc::clone(&stop);
   let emit_thread = Arc::clone(&emit);
+  let (commands, command_rx) = mpsc::channel();
   let join = std::thread::Builder::new()
     .name("teleprompter-wav".into())
     .spawn(move || {
@@ -100,11 +141,13 @@ pub fn spawn_writer(
         fault,
         device_id,
         loss_notified,
+        command_rx,
       )
     })
     .map_err(|error| RecorderError::Write(error.to_string()))?;
   Ok(WriterHandle {
     stop,
+    commands,
     join: Some(join),
     emit,
   })
@@ -121,6 +164,7 @@ fn write_loop(
   fault: Arc<AtomicBool>,
   device_id: String,
   loss_notified: Arc<AtomicBool>,
+  commands: Receiver<WriterCommand>,
 ) -> Result<WriterDone, RecorderError> {
   match write_audio(
     consumer,
@@ -133,6 +177,7 @@ fn write_loop(
     &fault,
     &device_id,
     &loss_notified,
+    commands,
   ) {
     Ok(done) => Ok(done),
     Err(error) => {
@@ -153,14 +198,15 @@ fn write_audio(
   fault: &AtomicBool,
   device_id: &str,
   loss_notified: &AtomicBool,
+  commands: Receiver<WriterCommand>,
 ) -> Result<WriterDone, RecorderError> {
-  let mut wav = WavFile::create(&path)?;
-  let mut stage = OutputStage::new(capture_rate)?;
-  let mut levels = LevelWindow::new(OUTPUT_SAMPLE_RATE);
+  let mut session = SessionWriter::open(&path, capture_rate)?;
   let mut batch = [0.0f32; 256];
-  let mut last_second = 0u64;
   let mut fault_sent = false;
   loop {
+    while let Ok(command) = commands.try_recv() {
+      apply_command(&mut consumer, &mut session, &written, emit.as_ref(), command);
+    }
     publish_fault(
       emit.as_ref(),
       fault,
@@ -168,38 +214,42 @@ fn write_audio(
       device_id,
       loss_notified,
     );
-    let mut count = 0;
-    while count < batch.len() {
-      match consumer.pop() {
-        Ok(sample) => {
-          batch[count] = sample;
-          count += 1;
-        }
-        Err(PopError::Empty) => break,
+    if session.is_paused() {
+      session.discard(discard_available(&mut consumer));
+      // The open segment was finalized when the pause landed. A fault or a
+      // stop while paused must not open it again.
+      if stop.load(Ordering::Acquire) || fault.load(Ordering::Acquire) {
+        break;
       }
+      match commands.recv_timeout(Duration::from_millis(2)) {
+        Ok(command) => apply_command(&mut consumer, &mut session, &written, emit.as_ref(), command),
+        Err(RecvTimeoutError::Timeout) => {}
+        Err(RecvTimeoutError::Disconnected) => break,
+      }
+      continue;
     }
+    let count = pop_batch(&mut consumer, &mut batch);
     if count > 0 {
-      stage.push(&batch[..count], &mut wav, &mut levels)?;
-      publish_levels(emit.as_ref(), levels.drain());
-      written.store(wav.frames(), Ordering::Relaxed);
-      checkpoint_if_due(&mut wav, &mut last_second)?;
+      session.push_slice(&batch[..count])?;
+      publish_levels(emit.as_ref(), session.drain_levels());
+      written.store(session.recorded_frames(), Ordering::Relaxed);
       continue;
     }
     // A stream fault finalizes the WAV here, on this thread, so the file stays
     // playable even if the page never calls stop. The callback itself only
     // sets `fault`.
     if stop.load(Ordering::Acquire) || fault.load(Ordering::Acquire) {
-      while let Ok(sample) = consumer.pop() {
-        stage.push(std::slice::from_ref(&sample), &mut wav, &mut levels)?;
-      }
-      publish_levels(emit.as_ref(), levels.drain());
+      drain_write(&mut consumer, &mut session, &written, emit.as_ref())?;
       break;
     }
-    std::thread::sleep(Duration::from_millis(2));
+    match commands.recv_timeout(Duration::from_millis(2)) {
+      Ok(command) => apply_command(&mut consumer, &mut session, &written, emit.as_ref(), command),
+      Err(RecvTimeoutError::Timeout) => {}
+      Err(RecvTimeoutError::Disconnected) => break,
+    }
   }
-  stage.finish(&mut wav, &mut levels)?;
-  publish_levels(emit.as_ref(), levels.drain());
-  if let Some(tail) = levels.finish() {
+  let done = session.finish()?;
+  if let Some(tail) = done.tail {
     publish_tick(emit.as_ref(), tail);
   }
   publish_fault(
@@ -209,18 +259,229 @@ fn write_audio(
     device_id,
     loss_notified,
   );
-  written.store(wav.frames(), Ordering::Relaxed);
-  let peaks = levels.take_peaks();
-  let finalized = wav.finalize()?;
+  written.store(done.frames, Ordering::Relaxed);
   // Capture is already stopped, and that stop happens-before the release
   // store this loop observed, so every overflow increment is visible.
   let dropped_samples = dropped.load(Ordering::Acquire);
   Ok(WriterDone {
-    frames: finalized.frames,
-    bytes: finalized.bytes,
+    frames: done.frames,
+    bytes: done.bytes,
     dropped_samples,
-    peaks,
+    paused_samples: done.paused_samples,
+    peaks: done.peaks,
   })
+}
+
+fn apply_command(
+  consumer: &mut Consumer<f32>,
+  session: &mut SessionWriter,
+  written: &AtomicU64,
+  emit: &dyn RecorderEmit,
+  command: WriterCommand,
+) {
+  match command {
+    WriterCommand::Pause(reply) => {
+      let result = pause_session(consumer, session, written, emit);
+      let _ = reply.send(result);
+    }
+    WriterCommand::Resume(path, reply) => {
+      if session.is_paused() {
+        session.discard(discard_available(consumer));
+      }
+      let result = session.resume(&path);
+      let _ = reply.send(result);
+    }
+  }
+}
+
+fn pause_session(
+  consumer: &mut Consumer<f32>,
+  session: &mut SessionWriter,
+  written: &AtomicU64,
+  emit: &dyn RecorderEmit,
+) -> Result<(), RecorderError> {
+  if session.is_paused() {
+    return Err(RecorderError::AlreadyPaused);
+  }
+  // Samples already in the ring were captured before this pause was observed.
+  drain_write(consumer, session, written, emit)?;
+  if let Some(tail) = session.pause()? {
+    publish_tick(emit, tail);
+  }
+  written.store(session.recorded_frames(), Ordering::Relaxed);
+  Ok(())
+}
+
+fn drain_write(
+  consumer: &mut Consumer<f32>,
+  session: &mut SessionWriter,
+  written: &AtomicU64,
+  emit: &dyn RecorderEmit,
+) -> Result<(), RecorderError> {
+  let mut batch = [0.0f32; 256];
+  loop {
+    let count = pop_batch(consumer, &mut batch);
+    if count == 0 {
+      break;
+    }
+    session.push_slice(&batch[..count])?;
+    publish_levels(emit, session.drain_levels());
+  }
+  written.store(session.recorded_frames(), Ordering::Relaxed);
+  Ok(())
+}
+
+fn pop_batch(consumer: &mut Consumer<f32>, batch: &mut [f32]) -> usize {
+  let mut count = 0;
+  while count < batch.len() {
+    match consumer.pop() {
+      Ok(sample) => {
+        batch[count] = sample;
+        count += 1;
+      }
+      Err(PopError::Empty) => break,
+    }
+  }
+  count
+}
+
+fn discard_available(consumer: &mut Consumer<f32>) -> u64 {
+  let mut count = 0u64;
+  while consumer.pop().is_ok() {
+    count += 1;
+  }
+  count
+}
+
+struct SessionDone {
+  frames: u64,
+  bytes: u64,
+  paused_samples: u64,
+  peaks: Vec<f32>,
+  tail: Option<LevelTick>,
+}
+
+struct SessionWriter {
+  wav: Option<WavFile>,
+  stage: OutputStage,
+  levels: LevelWindow,
+  paused: bool,
+  paused_samples: u64,
+  closed_frames: u64,
+  closed_bytes: u64,
+  last_second: u64,
+  capture_rate: u32,
+}
+
+impl SessionWriter {
+  fn open(path: &Path, capture_rate: u32) -> Result<Self, RecorderError> {
+    Ok(Self {
+      wav: Some(WavFile::create(path)?),
+      stage: OutputStage::new(capture_rate)?,
+      levels: LevelWindow::new(OUTPUT_SAMPLE_RATE),
+      paused: false,
+      paused_samples: 0,
+      closed_frames: 0,
+      closed_bytes: 0,
+      last_second: 0,
+      capture_rate,
+    })
+  }
+
+  fn is_paused(&self) -> bool {
+    self.paused
+  }
+
+  fn recorded_frames(&self) -> u64 {
+    self.closed_frames + self.wav.as_ref().map(WavFile::frames).unwrap_or(0)
+  }
+
+  fn discard(&mut self, frames: u64) {
+    self.paused_samples += frames;
+  }
+
+  fn drain_levels(&mut self) -> Vec<LevelTick> {
+    self.levels.drain()
+  }
+
+  fn push_slice(&mut self, samples: &[f32]) -> Result<(), RecorderError> {
+    if samples.is_empty() {
+      return Ok(());
+    }
+    if self.paused {
+      self.paused_samples += samples.len() as u64;
+      return Ok(());
+    }
+    let Self {
+      wav,
+      stage,
+      levels,
+      last_second,
+      ..
+    } = self;
+    let Some(wav) = wav.as_mut() else {
+      return Err(RecorderError::Write("the segment is not open".into()));
+    };
+    stage.push(samples, wav, levels)?;
+    checkpoint_if_due(wav, last_second)?;
+    Ok(())
+  }
+
+  fn pause(&mut self) -> Result<Option<LevelTick>, RecorderError> {
+    if self.paused {
+      return Err(RecorderError::AlreadyPaused);
+    }
+    let tail = self.close_open_segment()?;
+    self.paused = true;
+    Ok(tail)
+  }
+
+  fn resume(&mut self, path: &Path) -> Result<(), RecorderError> {
+    if !self.paused {
+      return Err(RecorderError::NotPaused);
+    }
+    let wav = WavFile::create(path)?;
+    let stage = OutputStage::continuing(self.capture_rate)?;
+    self.wav = Some(wav);
+    self.stage = stage;
+    self.last_second = 0;
+    self.paused = false;
+    Ok(())
+  }
+
+  fn finish(mut self) -> Result<SessionDone, RecorderError> {
+    let tail = if self.paused {
+      None
+    } else {
+      self.close_open_segment()?
+    };
+    Ok(SessionDone {
+      frames: self.closed_frames,
+      bytes: self.closed_bytes,
+      paused_samples: self.paused_samples,
+      peaks: self.levels.take_peaks(),
+      tail,
+    })
+  }
+
+  fn close_open_segment(&mut self) -> Result<Option<LevelTick>, RecorderError> {
+    let Some(mut wav) = self.wav.take() else {
+      return Ok(None);
+    };
+    if let Err(error) = self.stage.finish(&mut wav, &mut self.levels) {
+      self.wav = Some(wav);
+      return Err(error);
+    }
+    let tail = self.levels.finish();
+    match wav.finalize() {
+      Ok(done) => {
+        self.closed_frames += done.frames;
+        self.closed_bytes += done.bytes;
+        Ok(tail)
+      }
+      Err(error) => Err(error),
+    }
+  }
 }
 
 fn publish_levels(emit: &dyn RecorderEmit, ticks: Vec<LevelTick>) {
@@ -298,6 +559,17 @@ impl OutputStage {
       drop_leading: true,
       kind,
     })
+  }
+
+  /// A later segment. The stream is already open, so exact zeros are real
+  /// silence and stay in the file. A fresh resampler still trims its warmup.
+  fn continuing(capture_rate: u32) -> Result<Self, RecorderError> {
+    let mut stage = Self::new(capture_rate)?;
+    stage.drop_leading = false;
+    if let OutputKind::Resample(resampler) = &mut stage.kind {
+      resampler.drop_leading = false;
+    }
+    Ok(stage)
   }
 
   /// Index of the first sample that should be written. Leading exact zeros
@@ -735,6 +1007,62 @@ mod tests {
     let reader = hound::WavReader::open(&path).unwrap();
     assert_eq!(reader.duration(), 0);
     let _ = std::fs::remove_file(&path);
+  }
+
+  #[test]
+  fn pause_drops_ring_samples_and_resume_writes_a_new_file() {
+    let dir = std::env::temp_dir().join(format!(
+      "teleprompter-pause-{}-{}",
+      std::process::id(),
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let first_path = dir.join("seg-000.wav");
+    let second_path = dir.join("seg-001.wav");
+    let (mut producer, consumer) = RingBuffer::new(64);
+    let first = [0.5f32; 16];
+    for sample in first {
+      producer.push(sample).unwrap();
+    }
+    let (emit, fault) = test_emit();
+    let (device_id, loss) = loss_args();
+    let handle = spawn_writer(
+      consumer,
+      std::sync::Arc::new(AtomicU64::new(0)),
+      first_path.clone(),
+      48_000,
+      std::sync::Arc::new(AtomicU64::new(0)),
+      emit,
+      fault,
+      device_id,
+      loss,
+    )
+    .unwrap();
+    handle.pause().unwrap();
+    for _ in 0..8 {
+      producer.push(0.9).unwrap();
+    }
+    handle.resume(second_path.clone()).unwrap();
+    let second = [-0.5f32; 16];
+    for sample in second {
+      producer.push(sample).unwrap();
+    }
+    drop(producer);
+    let done = handle.finish().unwrap();
+    assert_eq!(done.paused_samples, 8);
+    assert_eq!(done.frames, 32);
+    let mut first_reader = hound::WavReader::open(&first_path).unwrap();
+    let mut second_reader = hound::WavReader::open(&second_path).unwrap();
+    assert_eq!(first_reader.duration(), 16);
+    assert_eq!(second_reader.duration(), 16);
+    let first_pcm: Vec<i16> = first_reader.samples::<i16>().map(|sample| sample.unwrap()).collect();
+    let second_pcm: Vec<i16> = second_reader.samples::<i16>().map(|sample| sample.unwrap()).collect();
+    assert!(first_pcm.iter().all(|sample| *sample > 0));
+    assert!(second_pcm.iter().all(|sample| *sample < 0));
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   #[test]

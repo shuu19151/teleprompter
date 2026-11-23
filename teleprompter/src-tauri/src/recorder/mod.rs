@@ -2,9 +2,20 @@
 //!
 //! `recorder_start` opens one input (the requested id, or the default when
 //! that id is missing), pushes one channel or a down-mix through a lock-free
-//! ring, and a writer thread stores a 48 kHz PCM WAV. That thread also emits
-//! meter and peak events. The capture callback never emits. A lost device
-//! finalizes the WAV and emits `recorder://device-lost`.
+//! ring, and a writer thread stores 48 kHz PCM WAV segments. That thread also
+//! emits meter and peak events. The capture callback never emits and never
+//! blocks. Pause does not touch it.
+//!
+//! `recorder_pause` finishes the open segment and tells the writer to drop
+//! every sample it pops. The ring keeps draining, so a pause cannot overflow
+//! it. Meter and peak events stop for the pause. The partial level window at
+//! the boundary is flushed into the segment that just closed, then nothing is
+//! emitted until resume. `recorder_resume` opens the next segment. The first
+//! file is `seg-000.wav`. Each resume adds `seg-001.wav`, `seg-002.wav`, and
+//! so on. A 60 second rotation is a later phase, and concatenation is the one
+//! after that. Duration counts written frames only, so the pause is not part
+//! of it. A lost device finalizes the open segment, including while paused,
+//! and emits `recorder://device-lost`.
 
 mod capture;
 mod device;
@@ -30,8 +41,12 @@ use events::{notify_device_lost, DevicesChangedEvent, ErrorEvent, RecorderEmit, 
 pub const OUTPUT_SAMPLE_RATE: u32 = 48_000;
 
 const SESSIONS_DIR: &str = ".sessions";
-const TAKE_FILE: &str = "take.wav";
 const SESSION_FILE: &str = "session.json";
+
+/// `seg-000.wav`, then `seg-001.wav` on each resume. The width is a minimum.
+fn segment_name(index: u32) -> String {
+  format!("seg-{index:03}.wav")
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecorderError {
@@ -39,6 +54,10 @@ pub enum RecorderError {
   AlreadyRecording,
   #[error("no recording is in progress")]
   NotRecording,
+  #[error("the recording is already paused")]
+  AlreadyPaused,
+  #[error("the recording is not paused")]
+  NotPaused,
   #[error("no microphone was found")]
   NoDevice,
   #[error("the selected microphone is not connected")]
@@ -60,6 +79,8 @@ impl RecorderError {
     match self {
       Self::AlreadyRecording => "already_recording",
       Self::NotRecording => "not_recording",
+      Self::AlreadyPaused => "already_paused",
+      Self::NotPaused => "not_paused",
       Self::NoDevice => "no_device",
       Self::DeviceMissing => "device_missing",
       Self::InvalidChannel => "invalid_channel",
@@ -94,7 +115,10 @@ pub struct StartResponse {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StopResponse {
+  /// First segment. Empty only when the take produced no file.
   pub path: String,
+  /// Every segment in record order. Pause does not add one; resume does.
+  pub paths: Vec<String>,
   pub duration_ms: u64,
   pub bytes: u64,
   pub dropped_samples: u64,
@@ -136,11 +160,7 @@ impl RecorderInner {
         duration_ms: 0,
         session_id: None,
       },
-      Some(session) => StateEvent {
-        state: RecorderPhase::Recording,
-        duration_ms: duration_ms(session.written.load(Ordering::Relaxed)),
-        session_id: Some(session.id.clone()),
-      },
+      Some(session) => session.state_event(),
     }
   }
 
@@ -226,6 +246,16 @@ impl RecorderInner {
     session.finish_lost().map(Some)
   }
 
+  pub fn pause(&mut self) -> Result<StateEvent, RecorderError> {
+    let session = self.active.as_mut().ok_or(RecorderError::NotRecording)?;
+    session.pause()
+  }
+
+  pub fn resume(&mut self) -> Result<StateEvent, RecorderError> {
+    let session = self.active.as_mut().ok_or(RecorderError::NotPaused)?;
+    session.resume()
+  }
+
   pub fn stop(&mut self) -> Result<StopResponse, RecorderError> {
     let session = self.active.take().ok_or(RecorderError::NotRecording)?;
     session.finish()
@@ -260,10 +290,11 @@ impl RecorderInner {
     self.active = Some(ActiveSession {
       id: prepared.id,
       directory: prepared.directory,
-      wav_path: prepared.wav_path,
+      segments: prepared.segments,
       text_key: prepared.text_key,
       device_name: prepared.device_name,
       started_at: prepared.started_at,
+      paused: false,
       capture,
       writer,
       written,
@@ -293,10 +324,12 @@ impl Drop for RecorderInner {
 struct ActiveSession {
   id: String,
   directory: PathBuf,
-  wav_path: PathBuf,
+  /// File names in the session folder, in record order.
+  segments: Vec<String>,
   text_key: String,
   device_name: String,
   started_at: String,
+  paused: bool,
   capture: capture::CapturePump,
   writer: writer::WriterHandle,
   written: Arc<AtomicU64>,
@@ -312,8 +345,48 @@ impl ActiveSession {
     self.finish()
   }
 
+  fn pause(&mut self) -> Result<StateEvent, RecorderError> {
+    if self.paused {
+      return Err(RecorderError::AlreadyPaused);
+    }
+    self.writer.pause()?;
+    self.paused = true;
+    let event = self.state_event();
+    self.emit.state(&StateNotice {
+      state: event.state,
+      duration_ms: event.duration_ms,
+    });
+    if let Err(error) = self.persist("paused") {
+      self.emit.error(&ErrorEvent::from_recorder(&error));
+      return Err(error);
+    }
+    Ok(event)
+  }
+
+  fn resume(&mut self) -> Result<StateEvent, RecorderError> {
+    if !self.paused {
+      return Err(RecorderError::NotPaused);
+    }
+    let name = segment_name(self.segments.len() as u32);
+    let path = self.directory.join(&name);
+    self.writer.resume(path)?;
+    self.segments.push(name);
+    self.paused = false;
+    let event = self.state_event();
+    self.emit.state(&StateNotice {
+      state: event.state,
+      duration_ms: event.duration_ms,
+    });
+    if let Err(error) = self.persist("recording") {
+      self.emit.error(&ErrorEvent::from_recorder(&error));
+      return Err(error);
+    }
+    Ok(event)
+  }
+
   fn finish(mut self) -> Result<StopResponse, RecorderError> {
     self.capture.stop();
+    let paths = self.segment_paths();
     let result = match self.writer.finish() {
       Ok(done) => match write_session(
         &self.directory,
@@ -321,9 +394,11 @@ impl ActiveSession {
         &self.text_key,
         &self.device_name,
         "stopped",
+        &self.segments,
       ) {
         Ok(()) => Ok(StopResponse {
-          path: path_string(&self.wav_path),
+          path: paths.first().cloned().unwrap_or_default(),
+          paths,
           duration_ms: duration_ms(done.frames),
           bytes: done.bytes,
           dropped_samples: done.dropped_samples,
@@ -342,6 +417,37 @@ impl ActiveSession {
       duration_ms,
     });
     result
+  }
+
+  fn state_event(&self) -> StateEvent {
+    StateEvent {
+      state: if self.paused {
+        RecorderPhase::Paused
+      } else {
+        RecorderPhase::Recording
+      },
+      duration_ms: duration_ms(self.written.load(Ordering::Relaxed)),
+      session_id: Some(self.id.clone()),
+    }
+  }
+
+  fn segment_paths(&self) -> Vec<String> {
+    self
+      .segments
+      .iter()
+      .map(|name| path_string(&self.directory.join(name)))
+      .collect()
+  }
+
+  fn persist(&self, state: &str) -> Result<(), RecorderError> {
+    write_session(
+      &self.directory,
+      &self.started_at,
+      &self.text_key,
+      &self.device_name,
+      state,
+      &self.segments,
+    )
   }
 
   fn discard(mut self) -> Result<(), RecorderError> {
@@ -368,6 +474,7 @@ struct PreparedSession {
   id: String,
   directory: PathBuf,
   wav_path: PathBuf,
+  segments: Vec<String>,
   text_key: String,
   device_name: String,
   started_at: String,
@@ -390,14 +497,24 @@ fn prepare_session(
     RecorderError::Session(format!("could not create {}: {error}", directory.display()))
   })?;
   let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-  if let Err(error) = write_session(&directory, &started_at, &text_key, &device_name, "recording") {
+  let segments = vec![segment_name(0)];
+  if let Err(error) = write_session(
+    &directory,
+    &started_at,
+    &text_key,
+    &device_name,
+    "recording",
+    &segments,
+  ) {
     let _ = fs::remove_dir_all(&directory);
     return Err(error);
   }
+  let wav_path = directory.join(&segments[0]);
   Ok(PreparedSession {
     id,
-    wav_path: directory.join(TAKE_FILE),
+    wav_path,
     directory,
+    segments,
     text_key,
     device_name,
     started_at,
@@ -410,6 +527,7 @@ fn write_session(
   text_key: &str,
   device_name: &str,
   state: &str,
+  segments: &[String],
 ) -> Result<(), RecorderError> {
   let body = serde_json::json!({
     "startedAt": started_at,
@@ -417,6 +535,7 @@ fn write_session(
     "sampleRate": OUTPUT_SAMPLE_RATE,
     "deviceName": device_name,
     "state": state,
+    "segments": segments,
   });
   let bytes = serde_json::to_vec_pretty(&body)
     .map_err(|error| RecorderError::Session(error.to_string()))?;
@@ -476,8 +595,9 @@ impl RecorderEmit for AppEmit {
 }
 
 /// Watch the input list a few times a second. While idle, a change emits
-/// `recorder://devices-changed`. While recording, a stream fault or a missing
-/// device finalizes the WAV and emits `recorder://device-lost`.
+/// `recorder://devices-changed`. While a take is open, including while it is
+/// paused, a stream fault or a missing device finalizes the current segment
+/// and emits `recorder://device-lost`.
 pub fn spawn_device_watch(app: AppHandle) {
   let built = std::thread::Builder::new()
     .name("teleprompter-devices".into())
@@ -575,6 +695,16 @@ pub fn recorder_list_devices() -> Result<Vec<InputDevice>, RecorderError> {
 }
 
 #[tauri::command(async)]
+pub fn recorder_pause(state: State<'_, RecorderState>) -> Result<StateEvent, RecorderError> {
+  lock(&state)?.pause()
+}
+
+#[tauri::command(async)]
+pub fn recorder_resume(state: State<'_, RecorderState>) -> Result<StateEvent, RecorderError> {
+  lock(&state)?.resume()
+}
+
+#[tauri::command(async)]
 pub fn recorder_stop(state: State<'_, RecorderState>) -> Result<StopResponse, RecorderError> {
   lock(&state)?.stop()
 }
@@ -606,6 +736,16 @@ mod tests {
         RecorderError::NotRecording,
         "not_recording",
         "no recording is in progress",
+      ),
+      (
+        RecorderError::AlreadyPaused,
+        "already_paused",
+        "the recording is already paused",
+      ),
+      (
+        RecorderError::NotPaused,
+        "not_paused",
+        "the recording is not paused",
       ),
       (
         RecorderError::NoDevice,
@@ -687,6 +827,7 @@ mod tests {
     assert_eq!(meta["sampleRate"], OUTPUT_SAMPLE_RATE);
     assert_eq!(meta["deviceName"], "Test input");
     assert_eq!(meta["state"], "recording");
+    assert_eq!(meta["segments"], serde_json::json!(["seg-000.wav"]));
     assert!(meta["startedAt"].as_str().unwrap().ends_with('Z'));
 
     let stopped = recorder.stop().unwrap();
@@ -700,11 +841,12 @@ mod tests {
     assert_eq!(stopped.duration_ms, duration_ms(4));
     assert_eq!(stopped.bytes, 44 + 8);
     assert_eq!(stopped.peaks.len(), 1);
-    assert_eq!(stopped.path, path_string(&session_path.join(TAKE_FILE)));
+    assert_eq!(stopped.paths, vec![path_string(&session_path.join(segment_name(0)))]);
+    assert_eq!(stopped.path, stopped.paths[0]);
     let after: serde_json::Value =
       serde_json::from_slice(&fs::read(session_path.join(SESSION_FILE)).unwrap()).unwrap();
     assert_eq!(after["state"], "stopped");
-    let reader = hound::WavReader::open(&session_path.join(TAKE_FILE)).unwrap();
+    let reader = hound::WavReader::open(&session_path.join(segment_name(0))).unwrap();
     assert_eq!(reader.duration(), 4);
   }
 
@@ -716,7 +858,7 @@ mod tests {
       .start_sine(dir.path(), "E01", OUTPUT_SAMPLE_RATE)
       .unwrap();
     let session_path = dir.path().join(&started.session_id);
-    assert!(session_path.join(TAKE_FILE).exists() || session_path.exists());
+    assert!(session_path.join(segment_name(0)).exists() || session_path.exists());
     recorder.cancel().unwrap();
     assert!(!session_path.exists());
     assert_eq!(recorder.status().state, RecorderPhase::Idle);
@@ -848,6 +990,184 @@ mod tests {
     assert_eq!(reader.spec().sample_rate, OUTPUT_SAMPLE_RATE);
   }
 
+  #[test]
+  fn pause_and_resume_reject_the_wrong_state() {
+    let mut recorder = RecorderInner::new();
+    assert!(matches!(recorder.pause(), Err(RecorderError::NotRecording)));
+    assert!(matches!(recorder.resume(), Err(RecorderError::NotPaused)));
+
+    let dir = scratch_dir();
+    recorder
+      .start_prefilled(dir.path(), "E01", &[0.25, -0.5], 8)
+      .unwrap();
+    assert!(matches!(recorder.resume(), Err(RecorderError::NotPaused)));
+    assert_eq!(recorder.status().state, RecorderPhase::Recording);
+
+    recorder.pause().unwrap();
+    assert_eq!(recorder.status().state, RecorderPhase::Paused);
+    assert!(matches!(recorder.pause(), Err(RecorderError::AlreadyPaused)));
+
+    recorder.resume().unwrap();
+    assert_eq!(recorder.status().state, RecorderPhase::Recording);
+    assert!(matches!(recorder.resume(), Err(RecorderError::NotPaused)));
+
+    let stopped = recorder.stop().unwrap();
+    assert_eq!(stopped.paths.len(), 2);
+    assert!(stopped.paths[0].ends_with("seg-000.wav"));
+    assert!(stopped.paths[1].ends_with("seg-001.wav"));
+    assert!(matches!(recorder.pause(), Err(RecorderError::NotRecording)));
+    assert!(matches!(recorder.resume(), Err(RecorderError::NotPaused)));
+    assert_eq!(recorder.status().state, RecorderPhase::Idle);
+  }
+
+  #[test]
+  fn pause_drops_samples_and_duration_skips_the_gap() {
+    let dir = scratch_dir();
+    let emit = Arc::new(MemoryEmit::default());
+    let mut recorder = RecorderInner::new();
+    let (started, mut producer) = recorder
+      .start_fed(
+        dir.path(),
+        "E01",
+        32_000,
+        Arc::clone(&emit) as Arc<dyn RecorderEmit>,
+      )
+      .unwrap();
+    let session_path = dir.path().join(&started.session_id);
+    let first = vec![0.5f32; 4_800];
+    let skipped = vec![0.9f32; 2_400];
+    let second = vec![-0.5f32; 4_800];
+    push_all(&mut producer, &first);
+
+    let paused = recorder.pause().unwrap();
+    assert_eq!(paused.state, RecorderPhase::Paused);
+    assert_eq!(paused.duration_ms, 100);
+    assert_eq!(paused.session_id.as_deref(), Some(started.session_id.as_str()));
+    assert_eq!(recorder.status().state, RecorderPhase::Paused);
+    assert_eq!(recorder.status().duration_ms, 100);
+    let during = read_session(&session_path);
+    assert_eq!(during["state"], "paused");
+    assert_eq!(during["segments"], serde_json::json!(["seg-000.wav"]));
+
+    let meters_at_pause = emit.meters.lock().unwrap().len();
+    let peaks_at_pause = emit.peaks.lock().unwrap().len();
+    push_all(&mut producer, &skipped);
+    let resumed = recorder.resume().unwrap();
+    assert_eq!(resumed.state, RecorderPhase::Recording);
+    assert_eq!(resumed.duration_ms, 100);
+    assert_eq!(emit.meters.lock().unwrap().len(), meters_at_pause);
+    assert_eq!(emit.peaks.lock().unwrap().len(), peaks_at_pause);
+    let recording = read_session(&session_path);
+    assert_eq!(recording["state"], "recording");
+    assert_eq!(
+      recording["segments"],
+      serde_json::json!(["seg-000.wav", "seg-001.wav"])
+    );
+
+    push_all(&mut producer, &second);
+    drop(producer);
+    let stopped = recorder.stop().unwrap();
+    assert_eq!(stopped.duration_ms, 200);
+    assert_eq!(stopped.dropped_samples, 0);
+    assert_eq!(stopped.paths.len(), 2);
+    assert_eq!(stopped.path, stopped.paths[0]);
+    assert!(stopped.paths[0].ends_with("seg-000.wav"));
+    assert!(stopped.paths[1].ends_with("seg-001.wav"));
+    assert_eq!(stopped.bytes, (44 + 4_800 * 2) * 2);
+    assert_eq!(read_pcm(Path::new(&stopped.paths[0])), pcm_of(&first));
+    assert_eq!(read_pcm(Path::new(&stopped.paths[1])), pcm_of(&second));
+    let after = read_session(&session_path);
+    assert_eq!(after["state"], "stopped");
+    assert_eq!(after["segments"].as_array().unwrap().len(), 2);
+
+    let states = emit.states.lock().unwrap();
+    assert_eq!(
+      states.iter().map(|state| state.state).collect::<Vec<_>>(),
+      vec![
+        RecorderPhase::Recording,
+        RecorderPhase::Paused,
+        RecorderPhase::Recording,
+        RecorderPhase::Idle,
+      ]
+    );
+    assert_eq!(states[1].duration_ms, 100);
+    assert_eq!(states[2].duration_ms, 100);
+    assert_eq!(states[3].duration_ms, 200);
+  }
+
+  #[test]
+  fn device_loss_while_paused_finalizes_the_open_segment() {
+    let dir = scratch_dir();
+    let emit = Arc::new(MemoryEmit::default());
+    let mut recorder = RecorderInner::new();
+    let (_started, mut producer) = recorder
+      .start_fed(
+        dir.path(),
+        "E01",
+        64,
+        Arc::clone(&emit) as Arc<dyn RecorderEmit>,
+      )
+      .unwrap();
+    let samples = [0.25f32, -0.5, 0.75, -0.25];
+    push_all(&mut producer, &samples);
+    recorder.pause().unwrap();
+    drop(producer);
+
+    let stopped = recorder
+      .finalize_if_lost(&["other-device"])
+      .unwrap()
+      .unwrap();
+    assert_eq!(recorder.status().state, RecorderPhase::Idle);
+    assert!(recorder.finalize_if_lost(&[] as &[&str]).unwrap().is_none());
+    assert_eq!(emit.lost.lock().unwrap().len(), 1);
+    assert_eq!(emit.lost.lock().unwrap()[0].device_id, "test-input");
+    assert_eq!(stopped.paths.len(), 1);
+    assert_eq!(stopped.duration_ms, duration_ms(samples.len() as u64));
+    assert_eq!(read_pcm(Path::new(&stopped.paths[0])), pcm_of(&samples));
+    let session_path = Path::new(&stopped.paths[0]).parent().unwrap();
+    let meta = read_session(session_path);
+    assert_eq!(meta["state"], "stopped");
+    assert_eq!(meta["segments"], serde_json::json!(["seg-000.wav"]));
+
+    let reader = hound::WavReader::open(&stopped.paths[0]).unwrap();
+    let spec = reader.spec();
+    assert_eq!(spec.channels, 1);
+    assert_eq!(spec.sample_rate, OUTPUT_SAMPLE_RATE);
+    assert_eq!(spec.bits_per_sample, 16);
+    assert_eq!(reader.duration(), samples.len() as u32);
+  }
+
+  #[test]
+  fn a_stream_fault_while_paused_still_leaves_a_readable_segment() {
+    let dir = scratch_dir();
+    let emit = Arc::new(MemoryEmit::default());
+    let mut recorder = RecorderInner::new();
+    let (_started, mut producer) = recorder
+      .start_fed(
+        dir.path(),
+        "E01",
+        32,
+        Arc::clone(&emit) as Arc<dyn RecorderEmit>,
+      )
+      .unwrap();
+    let samples = [0.5f32, -0.25];
+    push_all(&mut producer, &samples);
+    recorder.pause().unwrap();
+    recorder
+      .active
+      .as_ref()
+      .unwrap()
+      .fault
+      .store(true, Ordering::Release);
+    let stopped = recorder
+      .finalize_if_lost(&["test-input"])
+      .unwrap()
+      .unwrap();
+    assert_eq!(recorder.status().state, RecorderPhase::Idle);
+    assert_eq!(read_pcm(Path::new(&stopped.path)), pcm_of(&samples));
+    assert_eq!(emit.lost.lock().unwrap().len(), 1);
+  }
+
   impl RecorderInner {
     fn start_sine(
       &mut self,
@@ -962,6 +1282,66 @@ mod tests {
         emit,
       )
     }
+
+    fn start_fed(
+      &mut self,
+      sessions_root: &Path,
+      text_key: &str,
+      capacity: usize,
+      emit: Arc<dyn RecorderEmit>,
+    ) -> Result<(StartResponse, rtrb::Producer<f32>), RecorderError> {
+      if self.active.is_some() {
+        return Err(RecorderError::AlreadyRecording);
+      }
+      let prepared = prepare_session(sessions_root, text_key.to_string(), "Test input".into())?;
+      let (producer, consumer) = rtrb::RingBuffer::new(capacity.max(1));
+      let dropped = Arc::new(AtomicU64::new(0));
+      let written = Arc::new(AtomicU64::new(0));
+      let fault = Arc::new(AtomicBool::new(false));
+      let loss_notified = Arc::new(AtomicBool::new(false));
+      let device_id = "test-input".to_string();
+      let writer = writer::spawn_writer(
+        consumer,
+        dropped,
+        prepared.wav_path.clone(),
+        OUTPUT_SAMPLE_RATE,
+        Arc::clone(&written),
+        Arc::clone(&emit),
+        Arc::clone(&fault),
+        device_id.clone(),
+        Arc::clone(&loss_notified),
+      )?;
+      let started = self.activate(
+        prepared,
+        capture::CapturePump::already_stopped(),
+        writer,
+        written,
+        device_id,
+        fault,
+        loss_notified,
+        emit,
+      )?;
+      Ok((started, producer))
+    }
+  }
+
+  fn push_all(producer: &mut rtrb::Producer<f32>, samples: &[f32]) {
+    for sample in samples {
+      producer.push(*sample).expect("the test ring holds the fixture");
+    }
+  }
+
+  fn read_session(directory: &Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(directory.join(SESSION_FILE)).unwrap()).unwrap()
+  }
+
+  fn read_pcm(path: &Path) -> Vec<i16> {
+    let mut reader = hound::WavReader::open(path).unwrap();
+    reader.samples::<i16>().map(|sample| sample.unwrap()).collect()
+  }
+
+  fn pcm_of(samples: &[f32]) -> Vec<i16> {
+    samples.iter().copied().map(wav::f32_to_i16).collect()
   }
 
   #[derive(Default)]

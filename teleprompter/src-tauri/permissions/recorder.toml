@@ -4,6 +4,16 @@ description = "Enables the recorder_start command."
 commands.allow = ["recorder_start"]
 
 [[permission]]
+identifier = "allow-recorder-pause"
+description = "Enables the recorder_pause command."
+commands.allow = ["recorder_pause"]
+
+[[permission]]
+identifier = "allow-recorder-resume"
+description = "Enables the recorder_resume command."
+commands.allow = ["recorder_resume"]
+
+[[permission]]
 identifier = "allow-recorder-stop"
 description = "Enables the recorder_stop command."
 commands.allow = ["recorder_stop"]

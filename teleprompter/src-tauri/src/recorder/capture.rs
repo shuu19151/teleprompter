@@ -2,7 +2,9 @@
 //!
 //! The cpal callback converts each frame to one mono `f32` and pushes it into
 //! the ring. It does not lock, allocate, resample, emit, or touch the filesystem.
-//! A stream failure only raises [`note_stream_fault`]; the writer thread emits it.
+//! Pause does not reach this callback. The callback keeps pushing, and the
+//! writer thread drops those frames so the ring cannot fill. A stream failure
+//! only raises [`note_stream_fault`]; the writer thread emits it.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;

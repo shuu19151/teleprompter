@@ -12,6 +12,8 @@ pub fn run() {
     .manage(recorder::RecorderState::new())
     .invoke_handler(tauri::generate_handler![
       recorder::recorder_start,
+      recorder::recorder_pause,
+      recorder::recorder_resume,
       recorder::recorder_stop,
       recorder::recorder_status,
       recorder::recorder_cancel,
