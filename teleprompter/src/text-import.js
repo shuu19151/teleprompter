@@ -174,3 +174,64 @@ export function parseImportedText(raw, { title = '', fileName = '', markdown = f
   return { title: finalTitle, body }
 }
 
+export function scriptLineCount(body) {
+  return String(body ?? '')
+    .split('\n')
+    .filter((line) => line.trim()).length
+}
+
+export function validateImportBody(raw, { fileName = '', markdown = false } = {}) {
+  if (typeof raw !== 'string') return { error: EMPTY_IMPORT_MESSAGE }
+  if (textBytes(raw) > MAX_IMPORT_BYTES) return { error: SIZE_IMPORT_MESSAGE }
+  let text = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  if (markdown || isMarkdownName(fileName)) text = stripMarkdownHeadings(text)
+  text = text.trim()
+  if (!text) return { error: EMPTY_IMPORT_MESSAGE }
+  return { text }
+}
+
+export function fallbackTitle(text, fileName) {
+  const gap = text.indexOf('\n\n')
+  const titleBlock = gap === -1 ? text : text.slice(0, gap)
+  let finalTitle = ''
+  if (gap !== -1) finalTitle = titleCase(titleBlock)
+  else if (prettyFileName(fileName)) finalTitle = prettyFileName(fileName)
+  else {
+    const firstLine = text.split('\n').find((line) => line.trim())?.trim() ?? ''
+    finalTitle = firstLine ? titleCase(firstLine) : ''
+  }
+  finalTitle = clampTitle(finalTitle)
+  if (!finalTitle) finalTitle = prettyFileName(fileName) || 'Untitled'
+  return finalTitle
+}
+
+export function keptImportBody(existingBody, submittedBody, validatedText) {
+  return submittedBody === existingBody || validatedText === existingBody ? existingBody : validatedText
+}
+
+export function resolvedImportTitle(titleValue, body, fileName) {
+  return clampTitle(titleValue) || fallbackTitle(body, fileName)
+}
+
+export function newImportRecord({ id, title, body, createdAt }) {
+  return { id, title, body, createdAt }
+}
+
+export function updatedImportRecord(existing, { title, body, updatedAt }) {
+  return {
+    id: existing.id,
+    title,
+    body,
+    createdAt: existing.createdAt,
+    updatedAt,
+  }
+}
+
+/** Keep the current line index, clamped to the new script. No lines resets the place. */
+export function readingPlaceAfterEdit({ bodyChanged, body, index, fraction }) {
+  if (!bodyChanged) return { index, fraction }
+  const lines = scriptLineCount(body)
+  if (lines <= 0) return null
+  return { index: Math.min(index, lines - 1), fraction }
+}
+

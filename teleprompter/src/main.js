@@ -5,7 +5,34 @@ import '@fontsource/literata/latin-400.css'
 import '@fontsource/literata/latin-700.css'
 import './style.css'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import {
+  currentReading,
+  essayIndexByFile,
+  essayStorageRecord,
+  filterEssays,
+  filterImports,
+  itemKey,
+  openTextKey,
+  positionApplies,
+  positionStorageRecord,
+  resolveSelection,
+} from './content-selection.js'
 import { isEssayFile } from './essay-files.js'
+import {
+  READING_RATIO,
+  anchorOffset,
+  clampOffset,
+  findActiveIndex as activeLineIndex,
+  formatRemaining as formatSecondsLeft,
+  fractionAtOffset as fractionOnLine,
+  offsetForFraction as offsetOnLine,
+  pixelsPerSecond as scrollPixelsPerSecond,
+  progressRatio,
+  readingFromTop as guideFromTop,
+  remainingSeconds,
+  restoreOffset,
+  scriptFocusY as focusYFor,
+} from './reader-math.js'
 import {
   clearSavedFolder,
   deleteEssayFile,
@@ -22,21 +49,23 @@ import {
 } from './essay-folder.js'
 import { elementFromEvent, openRowMenu } from './row-menu.js'
 import {
-  clampTitle,
-  EMPTY_IMPORT_MESSAGE,
   isMarkdownName,
   isQuotaError,
   isTextFileName,
+  keptImportBody,
   loadImports,
   MAX_IMPORT_BYTES,
   newImportId,
+  newImportRecord,
   parseEssay,
   parseImportedText,
-  prettyFileName,
   readTextFile,
+  readingPlaceAfterEdit,
+  resolvedImportTitle,
   SIZE_IMPORT_MESSAGE,
   textBytes,
-  titleCase,
+  updatedImportRecord,
+  validateImportBody,
   writeImports,
 } from './text-import.js'
 import { warmRecordingStore } from './recording.js'
@@ -83,7 +112,6 @@ const IMPORTS_KEY = 'teleprompter:imports'
 const FONT_MIN = 24
 const FONT_MAX = 56
 const FONT_DEFAULT = 32
-const READING_RATIO = 1 / 3
 const SAVE_DELAY = 300
 const TYPE_IMPORT_MESSAGE = 'Choose a .txt or .md file.'
 const READ_IMPORT_MESSAGE = 'Could not read that file.'
@@ -202,24 +230,24 @@ let restoredAnchor = null
 let saveTimer = 0
 
 function pixelsPerSecond() {
-  return state.speed * 2.5
+  return scrollPixelsPerSecond(state.speed)
 }
 
 function readingFromTop() {
-  return offsetCache.height * READING_RATIO
+  return guideFromTop(offsetCache.height)
 }
 
 /** Script-space Y of the guide, one third down the stage. */
 function scriptFocusY() {
-  return state.offset + readingFromTop() - offsetCache.focusShift
+  return focusYFor({ offset: state.offset, height: offsetCache.height, focusShift: offsetCache.focusShift })
 }
 
 function offsetForFraction(top, height, fraction) {
-  return top + fraction * height - readingFromTop() + offsetCache.focusShift
+  return offsetOnLine(top, height, fraction, { readingFromTop: readingFromTop(), focusShift: offsetCache.focusShift })
 }
 
 function fractionAtOffset(top, height) {
-  return (scriptFocusY() - top) / (height || 1)
+  return fractionOnLine(top, height, scriptFocusY())
 }
 
 function maxOffset() {
@@ -231,12 +259,6 @@ function renderLines(body) {
     .split('\n')
     .map((line) => (line.trim() ? `<p class="line">${escapeHtml(line)}</p>` : '<div class="gap"></div>'))
     .join('')
-}
-
-function scriptLineCount(body) {
-  return String(body ?? '')
-    .split('\n')
-    .filter((line) => line.trim()).length
 }
 
 function measure() {
@@ -277,20 +299,7 @@ function measure() {
 }
 
 function findActiveIndex(focusY) {
-  const last = lineMetrics.length - 1
-  if (last <= 0) return 0
-  if (focusY <= lineMetrics[0].center) return 0
-  if (focusY >= lineMetrics[last].center) return last
-  let low = 0
-  let high = last
-  while (low + 1 < high) {
-    const mid = (low + high) >> 1
-    if (lineMetrics[mid].center <= focusY) low = mid
-    else high = mid
-  }
-  const lowDistance = focusY - lineMetrics[low].center
-  const highDistance = lineMetrics[high].center - focusY
-  return lowDistance <= highDistance ? low : high
+  return activeLineIndex(lineMetrics, focusY)
 }
 
 function paintFocus(next) {
@@ -314,12 +323,17 @@ function updateFocus() {
 }
 
 function reanchor() {
-  if (!anchor || !lineMetrics.length) return
-  if (anchor.width === offsetCache.width && anchor.height === offsetCache.height) return
-  const metric = lineMetrics[anchor.index]
-  if (!metric) return
-  const target = offsetForFraction(metric.top, metric.height, anchor.fraction)
-  state.offset = Math.min(offsetCache.max, Math.max(0, target))
+  const next = anchorOffset({
+    anchor,
+    metrics: lineMetrics,
+    width: offsetCache.width,
+    height: offsetCache.height,
+    max: offsetCache.max,
+    readingFromTop: readingFromTop(),
+    focusShift: offsetCache.focusShift,
+  })
+  if (next === null) return
+  state.offset = next
 }
 
 function captureAnchor() {
@@ -337,10 +351,7 @@ function captureAnchor() {
 }
 
 function formatRemaining(seconds) {
-  const total = Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0))
-  const minutes = Math.floor(total / 60)
-  const secs = total % 60
-  return `${minutes}:${String(secs).padStart(2, '0')} left`
+  return formatSecondsLeft(seconds)
 }
 
 function updateProgress() {
@@ -348,14 +359,13 @@ function updateProgress() {
   const label = document.querySelector('#progress-time')
   if (!bar && !label) return
   const max = offsetCache.max
-  const ratio = max > 0 ? Math.min(1, Math.max(0, state.offset / max)) : 0
+  const ratio = progressRatio(state.offset, max)
   if (bar) {
     bar.style.transform = `scaleX(${ratio})`
     bar.setAttribute('aria-valuenow', String(Math.round(ratio * 100)))
   }
   if (label) {
-    const rate = pixelsPerSecond()
-    const seconds = rate > 0 ? Math.max(0, max - state.offset) / rate : 0
+    const seconds = remainingSeconds(state.offset, max, pixelsPerSecond())
     label.textContent = formatRemaining(seconds)
   }
 }
@@ -414,31 +424,21 @@ function saveProgressNow() {
   saveProgress()
 }
 
-function itemKey(item) {
-  if (!item) return ''
-  return item.kind === 'import' ? item.id : item.file
-}
-
 function saveProgress() {
   const essay = current()
   if (!essay) return
-  const id = itemKey(essay)
-  writeStorage(
-    ESSAY_KEY,
-    JSON.stringify({
-      file: essay.file,
-      code: essay.code,
-      kind: essay.kind || 'essay',
-      id,
-    }),
-  )
+  const record = essayStorageRecord(essay)
+  writeStorage(ESSAY_KEY, JSON.stringify(record))
   const metric = lineMetrics[activeIndex]
   if (metric && offsetCache.height) {
     const fraction = fractionAtOffset(metric.top, metric.height)
-    writeStorage(POSITION_KEY, JSON.stringify({ index: activeIndex, fraction, id }))
+    writeStorage(
+      POSITION_KEY,
+      JSON.stringify(positionStorageRecord({ index: activeIndex, fraction, id: record.id, useLine: true })),
+    )
     return
   }
-  writeStorage(POSITION_KEY, JSON.stringify({ offset: state.offset, id }))
+  writeStorage(POSITION_KEY, JSON.stringify(positionStorageRecord({ offset: state.offset, id: record.id })))
 }
 
 function tick(now) {
@@ -495,7 +495,7 @@ function wheelDistance(event) {
 function scrollBy(distance) {
   if (!distance) return
   const limit = maxOffset()
-  const destination = Math.min(limit, Math.max(0, state.offset + wheelLeft + distance))
+  const destination = clampOffset(state.offset + wheelLeft + distance, limit)
   wheelLeft = destination - state.offset
   if (!raf) startLoop()
 }
@@ -571,26 +571,7 @@ function setTheme(next) {
 }
 
 function filtered() {
-  const q = state.query.trim().toLowerCase()
-  if (!q) return essays.map((essay, index) => ({ essay, index }))
-  return essays
-    .map((essay, index) => ({ essay, index }))
-    .filter(({ essay }) => `${essay.code} ${essay.title}`.toLowerCase().includes(q))
-}
-
-function asImportEssay(item, index) {
-  const words = `${item.title}\n${item.body}`.split(/\s+/).filter(Boolean).length
-  return {
-    kind: 'import',
-    id: item.id,
-    code: `U${index + 1}`,
-    file: item.id,
-    title: item.title,
-    body: item.body,
-    words,
-    minutes: Math.max(1, Math.round(words / 130)),
-    createdAt: item.createdAt,
-  }
+  return filterEssays(essays, state.query)
 }
 
 function askConfirm({ title, message }) {
@@ -609,61 +590,37 @@ function askConfirm({ title, message }) {
 }
 
 function current() {
-  if (state.kind === 'import') {
-    const index = imports.findIndex((item) => item.id === state.importId)
-    if (index !== -1) return asImportEssay(imports[index], index)
-  }
-  return essays[state.index]
+  return currentReading({
+    kind: state.kind,
+    index: state.index,
+    importId: state.importId,
+    essays,
+    imports,
+  })
 }
 
 function restoreEssay() {
-  const saved = loadJSON(ESSAY_KEY)
-  if (!saved || typeof saved !== 'object') return
-  if (saved.kind === 'import') {
-    const id = typeof saved.id === 'string' ? saved.id : saved.file
-    if (typeof id === 'string' && imports.some((item) => item.id === id)) {
-      state.kind = 'import'
-      state.importId = id
-      return
-    }
-    state.kind = 'essay'
-    state.index = 0
-    state.importId = null
-    return
-  }
-  const byFile = essays.findIndex((item) => item.file === saved.file)
-  if (byFile !== -1) {
-    state.kind = 'essay'
-    state.index = byFile
-    return
-  }
-  const byCode = essays.findIndex((item) => item.code === saved.code)
-  if (byCode !== -1) {
-    state.kind = 'essay'
-    state.index = byCode
-  }
+  const next = resolveSelection({ savedSelection: loadJSON(ESSAY_KEY), essays, imports })
+  if (!next) return
+  state.kind = next.kind
+  if (next.index !== undefined) state.index = next.index
+  if (Object.prototype.hasOwnProperty.call(next, 'importId')) state.importId = next.importId
 }
 
 function restorePosition() {
   const saved = loadJSON(POSITION_KEY)
-  if (!saved || typeof saved !== 'object') return
-  const key = itemKey(current())
-  if (typeof saved.id === 'string' && saved.id !== key) return
-  if (
-    Number.isInteger(saved.index) &&
-    saved.index >= 0 &&
-    saved.index < lineMetrics.length &&
-    Number.isFinite(saved.fraction)
-  ) {
-    const metric = lineMetrics[saved.index]
-    restoredAnchor = { index: saved.index, fraction: saved.fraction }
-    anchor = { index: saved.index, fraction: saved.fraction, width: -1, height: -1 }
-    state.offset = Math.min(offsetCache.max, Math.max(0, offsetForFraction(metric.top, metric.height, saved.fraction)))
-    return
-  }
-  if (Number.isFinite(saved.offset)) {
-    state.offset = Math.min(offsetCache.max, Math.max(0, saved.offset))
-  }
+  if (!positionApplies(saved, itemKey(current()))) return
+  const next = restoreOffset({
+    saved,
+    lineMetrics,
+    max: offsetCache.max,
+    readingFromTop: readingFromTop(),
+    focusShift: offsetCache.focusShift,
+  })
+  if (!next) return
+  if (next.restoredAnchor) restoredAnchor = next.restoredAnchor
+  if (next.anchor) anchor = next.anchor
+  state.offset = next.offset
 }
 
 let noticeTimer = 0
@@ -774,7 +731,7 @@ function applyEssayList(next) {
     saveProgressNow()
     return
   }
-  const found = essays.findIndex((item) => item.file === currentFile)
+  const found = essayIndexByFile(essays, currentFile)
   if (found === -1) {
     void stopRecordingAndSave()
     state.kind = 'essay'
@@ -1023,8 +980,8 @@ async function useBundledEssays() {
 
 function selectReading({ kind, index = 0, id = null }) {
   void stopRecordingAndSave({ openAfter: false })
-  const prevKey = state.kind === 'import' ? state.importId : essays[state.index]?.file
-  const nextKey = kind === 'import' ? id : essays[index]?.file
+  const prevKey = openTextKey({ kind: state.kind, index: state.index, importId: state.importId, essays })
+  const nextKey = openTextKey({ kind, index, importId: id, essays })
   const changed = prevKey !== nextKey
   if (changed) closeRecorderPanel()
   state.running = false
@@ -1063,10 +1020,7 @@ function setDrawer(open) {
 }
 
 function filteredImports() {
-  const q = state.query.trim().toLowerCase()
-  return imports
-    .map((item, index) => ({ item, index, reading: asImportEssay(item, index) }))
-    .filter(({ item, reading }) => !q || `${reading.code} ${reading.title} ${item.body}`.toLowerCase().includes(q))
+  return filterImports(imports, state.query)
 }
 
 function renderEssayList() {
@@ -1153,43 +1107,18 @@ function clearImportNote() {
 function addImport(raw, options) {
   const parsed = parseImportedText(raw, options)
   if (parsed.error) return parsed
-  const item = {
+  const item = newImportRecord({
     id: newImportId(),
     title: parsed.title,
     body: parsed.body,
     createdAt: new Date().toISOString(),
-  }
+  })
   const next = [...imports, item]
   const saved = writeImports(next)
   if (!saved.ok) return { error: saved.quota ? QUOTA_IMPORT_MESSAGE : 'Could not save this text.' }
   imports = next
   clearImportNote()
   return { item }
-}
-
-function validateImportBody(raw, { fileName = '', markdown = false } = {}) {
-  if (typeof raw !== 'string') return { error: EMPTY_IMPORT_MESSAGE }
-  if (textBytes(raw) > MAX_IMPORT_BYTES) return { error: SIZE_IMPORT_MESSAGE }
-  let text = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-  if (markdown || isMarkdownName(fileName)) text = stripMarkdownHeadings(text)
-  text = text.trim()
-  if (!text) return { error: EMPTY_IMPORT_MESSAGE }
-  return { text }
-}
-
-function fallbackTitle(text, fileName) {
-  const gap = text.indexOf('\n\n')
-  const titleBlock = gap === -1 ? text : text.slice(0, gap)
-  let finalTitle = ''
-  if (gap !== -1) finalTitle = titleCase(titleBlock)
-  else if (prettyFileName(fileName)) finalTitle = prettyFileName(fileName)
-  else {
-    const firstLine = text.split('\n').find((line) => line.trim())?.trim() ?? ''
-    finalTitle = firstLine ? titleCase(firstLine) : ''
-  }
-  finalTitle = clampTitle(finalTitle)
-  if (!finalTitle) finalTitle = prettyFileName(fileName) || 'Untitled'
-  return finalTitle
 }
 
 function capturedReadingPlace() {
@@ -1209,15 +1138,9 @@ function updateImport(id, titleValue, bodyValue) {
   if (validated.error) return validated
   // An untouched textarea must round-trip the stored body exactly, even when
   // normalization would otherwise rewrite whitespace.
-  const body = bodyValue === existing.body || validated.text === existing.body ? existing.body : validated.text
-  const title = clampTitle(titleValue) || fallbackTitle(body, importFileName)
-  const nextItem = {
-    id: existing.id,
-    title,
-    body,
-    createdAt: existing.createdAt,
-    updatedAt: new Date().toISOString(),
-  }
+  const body = keptImportBody(existing.body, bodyValue, validated.text)
+  const title = resolvedImportTitle(titleValue, body, importFileName)
+  const nextItem = updatedImportRecord(existing, { title, body, updatedAt: new Date().toISOString() })
   const next = imports.map((item) => (item.id === id ? nextItem : item))
   const saved = writeImports(next)
   if (!saved.ok) return { error: saved.quota ? QUOTA_IMPORT_MESSAGE : 'Could not save this text.' }
@@ -1227,17 +1150,12 @@ function updateImport(id, titleValue, bodyValue) {
   clearImportNote()
   renderImportList()
   if (state.kind === 'import' && state.importId === id) {
-    if (bodyChanged) {
-      const lines = scriptLineCount(body)
-      if (lines <= 0) {
-        anchor = null
-        state.offset = 0
-      } else {
-        // Keep the current line index, clamped to the new script.
-        placeReading(Math.min(place.index, lines - 1), place.fraction)
-      }
+    const nextPlace = readingPlaceAfterEdit({ bodyChanged, body, index: place.index, fraction: place.fraction })
+    if (!nextPlace) {
+      anchor = null
+      state.offset = 0
     } else {
-      placeReading(place.index, place.fraction)
+      placeReading(nextPlace.index, nextPlace.fraction)
     }
     renderSheet()
     saveProgressNow()
