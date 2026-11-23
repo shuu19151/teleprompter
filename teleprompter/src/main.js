@@ -49,21 +49,23 @@ import {
 } from './essay-folder.js'
 import { elementFromEvent, openRowMenu } from './row-menu.js'
 import {
-  clampTitle,
-  EMPTY_IMPORT_MESSAGE,
   isMarkdownName,
   isQuotaError,
   isTextFileName,
+  keptImportBody,
   loadImports,
   MAX_IMPORT_BYTES,
   newImportId,
+  newImportRecord,
   parseEssay,
   parseImportedText,
-  prettyFileName,
   readTextFile,
+  readingPlaceAfterEdit,
+  resolvedImportTitle,
   SIZE_IMPORT_MESSAGE,
   textBytes,
-  titleCase,
+  updatedImportRecord,
+  validateImportBody,
   writeImports,
 } from './text-import.js'
 import { warmRecordingStore } from './recording.js'
@@ -257,12 +259,6 @@ function renderLines(body) {
     .split('\n')
     .map((line) => (line.trim() ? `<p class="line">${escapeHtml(line)}</p>` : '<div class="gap"></div>'))
     .join('')
-}
-
-function scriptLineCount(body) {
-  return String(body ?? '')
-    .split('\n')
-    .filter((line) => line.trim()).length
 }
 
 function measure() {
@@ -1111,43 +1107,18 @@ function clearImportNote() {
 function addImport(raw, options) {
   const parsed = parseImportedText(raw, options)
   if (parsed.error) return parsed
-  const item = {
+  const item = newImportRecord({
     id: newImportId(),
     title: parsed.title,
     body: parsed.body,
     createdAt: new Date().toISOString(),
-  }
+  })
   const next = [...imports, item]
   const saved = writeImports(next)
   if (!saved.ok) return { error: saved.quota ? QUOTA_IMPORT_MESSAGE : 'Could not save this text.' }
   imports = next
   clearImportNote()
   return { item }
-}
-
-function validateImportBody(raw, { fileName = '', markdown = false } = {}) {
-  if (typeof raw !== 'string') return { error: EMPTY_IMPORT_MESSAGE }
-  if (textBytes(raw) > MAX_IMPORT_BYTES) return { error: SIZE_IMPORT_MESSAGE }
-  let text = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-  if (markdown || isMarkdownName(fileName)) text = stripMarkdownHeadings(text)
-  text = text.trim()
-  if (!text) return { error: EMPTY_IMPORT_MESSAGE }
-  return { text }
-}
-
-function fallbackTitle(text, fileName) {
-  const gap = text.indexOf('\n\n')
-  const titleBlock = gap === -1 ? text : text.slice(0, gap)
-  let finalTitle = ''
-  if (gap !== -1) finalTitle = titleCase(titleBlock)
-  else if (prettyFileName(fileName)) finalTitle = prettyFileName(fileName)
-  else {
-    const firstLine = text.split('\n').find((line) => line.trim())?.trim() ?? ''
-    finalTitle = firstLine ? titleCase(firstLine) : ''
-  }
-  finalTitle = clampTitle(finalTitle)
-  if (!finalTitle) finalTitle = prettyFileName(fileName) || 'Untitled'
-  return finalTitle
 }
 
 function capturedReadingPlace() {
@@ -1167,15 +1138,9 @@ function updateImport(id, titleValue, bodyValue) {
   if (validated.error) return validated
   // An untouched textarea must round-trip the stored body exactly, even when
   // normalization would otherwise rewrite whitespace.
-  const body = bodyValue === existing.body || validated.text === existing.body ? existing.body : validated.text
-  const title = clampTitle(titleValue) || fallbackTitle(body, importFileName)
-  const nextItem = {
-    id: existing.id,
-    title,
-    body,
-    createdAt: existing.createdAt,
-    updatedAt: new Date().toISOString(),
-  }
+  const body = keptImportBody(existing.body, bodyValue, validated.text)
+  const title = resolvedImportTitle(titleValue, body, importFileName)
+  const nextItem = updatedImportRecord(existing, { title, body, updatedAt: new Date().toISOString() })
   const next = imports.map((item) => (item.id === id ? nextItem : item))
   const saved = writeImports(next)
   if (!saved.ok) return { error: saved.quota ? QUOTA_IMPORT_MESSAGE : 'Could not save this text.' }
@@ -1185,17 +1150,12 @@ function updateImport(id, titleValue, bodyValue) {
   clearImportNote()
   renderImportList()
   if (state.kind === 'import' && state.importId === id) {
-    if (bodyChanged) {
-      const lines = scriptLineCount(body)
-      if (lines <= 0) {
-        anchor = null
-        state.offset = 0
-      } else {
-        // Keep the current line index, clamped to the new script.
-        placeReading(Math.min(place.index, lines - 1), place.fraction)
-      }
+    const nextPlace = readingPlaceAfterEdit({ bodyChanged, body, index: place.index, fraction: place.fraction })
+    if (!nextPlace) {
+      anchor = null
+      state.offset = 0
     } else {
-      placeReading(place.index, place.fraction)
+      placeReading(nextPlace.index, nextPlace.fraction)
     }
     renderSheet()
     saveProgressNow()
