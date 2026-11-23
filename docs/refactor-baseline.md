@@ -2,6 +2,8 @@
 
 Phase 0 snapshot of the teleprompter, taken before any domain split. Later phases keep this behavior, this UI, and these stored shapes. There is no global reactive store: each module holds its own state and writes the DOM itself.
 
+The layout after the last refactor phase is in `docs/architecture.md`. This file stays the record of behavior and stored data.
+
 Commands below were run from `teleprompter/` on Node v22.23.4 and npm 10.9.9.
 
 | Command | Result |
