@@ -14,7 +14,7 @@ use audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler};
 use rtrb::{Consumer, PopError};
 
-use super::events::{ErrorEvent, RecorderEmit};
+use super::events::{notify_device_lost, ErrorEvent, RecorderEmit};
 use super::levels::{LevelTick, LevelWindow};
 use super::wav::WavFile;
 use super::{RecorderError, OUTPUT_SAMPLE_RATE};
@@ -80,6 +80,8 @@ pub fn spawn_writer(
   written: Arc<AtomicU64>,
   emit: Arc<dyn RecorderEmit>,
   fault: Arc<AtomicBool>,
+  device_id: String,
+  loss_notified: Arc<AtomicBool>,
 ) -> Result<WriterHandle, RecorderError> {
   let stop = Arc::new(AtomicBool::new(false));
   let stop_flag = Arc::clone(&stop);
@@ -96,6 +98,8 @@ pub fn spawn_writer(
         stop_flag,
         emit_thread,
         fault,
+        device_id,
+        loss_notified,
       )
     })
     .map_err(|error| RecorderError::Write(error.to_string()))?;
@@ -115,9 +119,20 @@ fn write_loop(
   stop: Arc<AtomicBool>,
   emit: Arc<dyn RecorderEmit>,
   fault: Arc<AtomicBool>,
+  device_id: String,
+  loss_notified: Arc<AtomicBool>,
 ) -> Result<WriterDone, RecorderError> {
   match write_audio(
-    consumer, dropped, path, capture_rate, written, stop, &emit, &fault,
+    consumer,
+    dropped,
+    path,
+    capture_rate,
+    written,
+    stop,
+    &emit,
+    &fault,
+    &device_id,
+    &loss_notified,
   ) {
     Ok(done) => Ok(done),
     Err(error) => {
@@ -136,6 +151,8 @@ fn write_audio(
   stop: Arc<AtomicBool>,
   emit: &Arc<dyn RecorderEmit>,
   fault: &AtomicBool,
+  device_id: &str,
+  loss_notified: &AtomicBool,
 ) -> Result<WriterDone, RecorderError> {
   let mut wav = WavFile::create(&path)?;
   let mut stage = OutputStage::new(capture_rate)?;
@@ -144,7 +161,13 @@ fn write_audio(
   let mut last_second = 0u64;
   let mut fault_sent = false;
   loop {
-    publish_fault(emit.as_ref(), fault, &mut fault_sent);
+    publish_fault(
+      emit.as_ref(),
+      fault,
+      &mut fault_sent,
+      device_id,
+      loss_notified,
+    );
     let mut count = 0;
     while count < batch.len() {
       match consumer.pop() {
@@ -162,7 +185,10 @@ fn write_audio(
       checkpoint_if_due(&mut wav, &mut last_second)?;
       continue;
     }
-    if stop.load(Ordering::Acquire) {
+    // A stream fault finalizes the WAV here, on this thread, so the file stays
+    // playable even if the page never calls stop. The callback itself only
+    // sets `fault`.
+    if stop.load(Ordering::Acquire) || fault.load(Ordering::Acquire) {
       while let Ok(sample) = consumer.pop() {
         stage.push(std::slice::from_ref(&sample), &mut wav, &mut levels)?;
       }
@@ -176,7 +202,13 @@ fn write_audio(
   if let Some(tail) = levels.finish() {
     publish_tick(emit.as_ref(), tail);
   }
-  publish_fault(emit.as_ref(), fault, &mut fault_sent);
+  publish_fault(
+    emit.as_ref(),
+    fault,
+    &mut fault_sent,
+    device_id,
+    loss_notified,
+  );
   written.store(wav.frames(), Ordering::Relaxed);
   let peaks = levels.take_peaks();
   let finalized = wav.finalize()?;
@@ -206,12 +238,19 @@ fn publish_tick(emit: &dyn RecorderEmit, tick: LevelTick) {
   }
 }
 
-fn publish_fault(emit: &dyn RecorderEmit, fault: &AtomicBool, sent: &mut bool) {
+fn publish_fault(
+  emit: &dyn RecorderEmit,
+  fault: &AtomicBool,
+  sent: &mut bool,
+  device_id: &str,
+  loss_notified: &AtomicBool,
+) {
   if *sent || !fault.load(Ordering::Acquire) {
     return;
   }
   *sent = true;
   emit.error(&ErrorEvent::capture_fault());
+  notify_device_lost(emit, loss_notified, device_id);
 }
 
 fn checkpoint_if_due(wav: &mut WavFile, last_second: &mut u64) -> Result<(), RecorderError> {
@@ -415,7 +454,9 @@ mod tests {
   use std::sync::Mutex;
 
   use super::*;
-  use crate::recorder::events::{ErrorEvent, MeterEvent, PeaksEvent, RecorderEmit, StateNotice};
+  use crate::recorder::events::{
+    DeviceLostEvent, DevicesChangedEvent, ErrorEvent, MeterEvent, PeaksEvent, RecorderEmit, StateNotice,
+  };
   use rtrb::RingBuffer;
 
   struct MemoryEmit {
@@ -458,6 +499,16 @@ mod tests {
       self.note_thread();
       self.errors.lock().unwrap().push(event.clone());
     }
+
+    fn device_lost(&self, _event: &DeviceLostEvent) {
+      self.note_thread();
+    }
+
+    fn devices_changed(&self, _event: &DevicesChangedEvent) {}
+  }
+
+  fn loss_args() -> (String, Arc<AtomicBool>) {
+    ("test-input".into(), Arc::new(AtomicBool::new(false)))
   }
 
   fn test_emit() -> (Arc<dyn RecorderEmit>, Arc<AtomicBool>) {
@@ -484,6 +535,7 @@ mod tests {
     drop(producer);
     let written = std::sync::Arc::new(AtomicU64::new(0));
     let (emit, fault) = test_emit();
+    let (device_id, loss) = loss_args();
     let handle = spawn_writer(
       consumer,
       std::sync::Arc::clone(&dropped),
@@ -492,6 +544,8 @@ mod tests {
       written,
       emit,
       fault,
+      device_id,
+      loss,
     )
     .unwrap();
     let done = handle.finish().unwrap();
@@ -529,7 +583,19 @@ mod tests {
     let dropped = std::sync::Arc::new(AtomicU64::new(3));
     let written = std::sync::Arc::new(AtomicU64::new(0));
     let (emit, fault) = test_emit();
-    let handle = spawn_writer(consumer, dropped, path.clone(), 48_000, written, emit, fault).unwrap();
+    let (device_id, loss) = loss_args();
+    let handle = spawn_writer(
+      consumer,
+      dropped,
+      path.clone(),
+      48_000,
+      written,
+      emit,
+      fault,
+      device_id,
+      loss,
+    )
+    .unwrap();
     let done = handle.finish().unwrap();
     assert_eq!(done.frames, frames as u64);
     assert_eq!(done.dropped_samples, 3);
@@ -551,6 +617,7 @@ mod tests {
     let fault = Arc::new(AtomicBool::new(true));
     let dropped = std::sync::Arc::new(AtomicU64::new(0));
     let written = std::sync::Arc::new(AtomicU64::new(0));
+    let (device_id, loss) = loss_args();
     let handle = spawn_writer(
       consumer,
       dropped,
@@ -559,6 +626,8 @@ mod tests {
       written,
       Arc::clone(&emit) as Arc<dyn RecorderEmit>,
       fault,
+      device_id,
+      loss,
     )
     .unwrap();
     let done = handle.finish().unwrap();

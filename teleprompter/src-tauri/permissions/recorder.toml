@@ -17,3 +17,8 @@ commands.allow = ["recorder_status"]
 identifier = "allow-recorder-cancel"
 description = "Enables the recorder_cancel command."
 commands.allow = ["recorder_cancel"]
+
+[[permission]]
+identifier = "allow-recorder-list-devices"
+description = "Enables the recorder_list_devices command."
+commands.allow = ["recorder_list_devices"]

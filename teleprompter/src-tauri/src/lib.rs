@@ -15,6 +15,7 @@ pub fn run() {
       recorder::recorder_stop,
       recorder::recorder_status,
       recorder::recorder_cancel,
+      recorder::recorder_list_devices,
     ])
     // The page origin is http://tauri.localhost. Allowing the microphone here
     // answers getUserMedia before WebView2 draws its site permission prompt.
@@ -24,6 +25,7 @@ pub fn run() {
       _ => tauri::webview::PermissionResponse::Default,
     })
     .setup(|app| {
+      recorder::spawn_device_watch(app.handle().clone());
       if cfg!(debug_assertions) {
         app.handle().plugin(
           tauri_plugin_log::Builder::default()

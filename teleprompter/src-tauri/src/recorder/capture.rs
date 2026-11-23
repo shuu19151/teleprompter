@@ -21,14 +21,17 @@ pub fn ring_capacity(capture_rate: u32) -> usize {
   (capture_rate as usize).clamp(8 * 1024, 192_000)
 }
 
-/// Down-mix interleaved frames to mono and push them.
+/// Down-mix interleaved frames to mono, or keep one channel, and push them.
 ///
-/// Samples that do not fit are counted in `dropped` and are not written over
-/// older frames. `missed` is published once per call so the callback does not
-/// touch the atomic unless the ring overflowed.
+/// `channel` `None` averages the frame. `Some(index)` copies that 0-based
+/// channel and ignores the others. Samples that do not fit are counted in
+/// `dropped` and are not written over older frames. `missed` is published
+/// once per call so the callback does not touch the atomic unless the ring
+/// overflowed. This function does not allocate.
 pub fn push_frames<T: Copy>(
   data: &[T],
   channels: u16,
+  channel: Option<u16>,
   producer: &mut Producer<f32>,
   dropped: &AtomicU64,
   to_f32: fn(T) -> f32,
@@ -41,17 +44,38 @@ pub fn push_frames<T: Copy>(
   let mut missed = 0u64;
   for frame in 0..frames {
     let start = frame * channels;
-    let mut sum = 0.0f32;
-    for sample in &data[start..start + channels] {
-      sum += to_f32(*sample);
-    }
-    let mono = sum / channels as f32;
+    let Some(mono) = mix_channel(&data[start..start + channels], channel, to_f32) else {
+      continue;
+    };
     if producer.push(mono).is_err() {
       missed += 1;
     }
   }
   if missed != 0 {
     dropped.fetch_add(missed, Ordering::Relaxed);
+  }
+}
+
+/// One mono sample from an interleaved frame.
+///
+/// `None` means the requested channel is not in this frame. The callback
+/// skips it instead of inventing a sample.
+pub fn mix_channel<T: Copy>(frame: &[T], channel: Option<u16>, to_f32: fn(T) -> f32) -> Option<f32> {
+  if frame.is_empty() {
+    return None;
+  }
+  match channel {
+    Some(index) => {
+      let index = usize::from(index);
+      frame.get(index).copied().map(to_f32)
+    }
+    None => {
+      let mut sum = 0.0f32;
+      for sample in frame {
+        sum += to_f32(*sample);
+      }
+      Some(sum / frame.len() as f32)
+    }
   }
 }
 
@@ -84,6 +108,7 @@ pub fn start_input(
   fault: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, RecorderError> {
   let channels = opened.channels;
+  let channel = opened.channel;
   let config = opened.stream_config;
   let stream = match opened.format {
     SampleFormatKind::F32 => build_stream::<f32>(
@@ -93,6 +118,7 @@ pub fn start_input(
       dropped,
       fault,
       channels,
+      channel,
       f32_sample,
     )?,
     SampleFormatKind::I16 => build_stream::<i16>(
@@ -102,6 +128,7 @@ pub fn start_input(
       dropped,
       fault,
       channels,
+      channel,
       i16_to_f32,
     )?,
     SampleFormatKind::U16 => build_stream::<u16>(
@@ -111,6 +138,7 @@ pub fn start_input(
       dropped,
       fault,
       channels,
+      channel,
       u16_to_f32,
     )?,
   };
@@ -127,6 +155,7 @@ fn build_stream<T>(
   dropped: Arc<AtomicU64>,
   fault: Arc<AtomicBool>,
   channels: u16,
+  channel: Option<u16>,
   to_f32: fn(T) -> f32,
 ) -> Result<cpal::Stream, RecorderError>
 where
@@ -136,7 +165,7 @@ where
     .build_input_stream(
       config,
       move |data: &[T], _| {
-        push_frames(data, channels, &mut producer, &dropped, to_f32);
+        push_frames(data, channels, channel, &mut producer, &dropped, to_f32);
       },
       move |error| {
         log::error!("microphone stream error: {error}");
@@ -220,7 +249,7 @@ mod tests {
     let (mut producer, mut consumer) = RingBuffer::new(4);
     let dropped = AtomicU64::new(0);
     let samples = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
-    push_frames(&samples, 1, &mut producer, &dropped, f32_sample);
+    push_frames(&samples, 1, None, &mut producer, &dropped, f32_sample);
     assert_eq!(dropped.load(Ordering::Relaxed), 2);
     assert_eq!(consumer.pop().unwrap(), 0.1);
     assert_eq!(consumer.pop().unwrap(), 0.2);
@@ -234,7 +263,7 @@ mod tests {
     let (mut producer, mut consumer) = RingBuffer::new(8);
     let dropped = AtomicU64::new(0);
     let interleaved = [1.0, -1.0, 0.5, 0.5, 0.0, 1.0];
-    push_frames(&interleaved, 2, &mut producer, &dropped, f32_sample);
+    push_frames(&interleaved, 2, None, &mut producer, &dropped, f32_sample);
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
     assert!(near(consumer.pop().unwrap(), 0.0));
     assert!(near(consumer.pop().unwrap(), 0.5));
@@ -249,6 +278,7 @@ mod tests {
     push_frames(
       &[i16::MAX, i16::MIN],
       2,
+      None,
       &mut producer,
       &dropped,
       i16_to_f32,
@@ -256,16 +286,36 @@ mod tests {
     assert!(near(consumer.pop().unwrap(), 0.0));
 
     let (mut producer, mut consumer) = RingBuffer::new(4);
-    push_frames(&[0u16, 65535], 2, &mut producer, &dropped, u16_to_f32);
+    push_frames(&[0u16, 65535], 2, None, &mut producer, &dropped, u16_to_f32);
     assert!(near(consumer.pop().unwrap(), 0.0));
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
+  }
+
+  #[test]
+  fn one_channel_is_copied_and_the_other_is_left_out() {
+    let interleaved = [0.25, 0.75, -0.5, 0.5, 1.0];
+    let (mut producer, mut consumer) = RingBuffer::new(8);
+    let dropped = AtomicU64::new(0);
+    push_frames(&interleaved, 2, Some(0), &mut producer, &dropped, f32_sample);
+    assert!(near(consumer.pop().unwrap(), 0.25));
+    assert!(near(consumer.pop().unwrap(), -0.5));
+    assert!(consumer.pop().is_err());
+
+    let (mut producer, mut consumer) = RingBuffer::new(8);
+    push_frames(&interleaved, 2, Some(1), &mut producer, &dropped, f32_sample);
+    assert!(near(consumer.pop().unwrap(), 0.75));
+    assert!(near(consumer.pop().unwrap(), 0.5));
+    assert!(consumer.pop().is_err());
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    assert_eq!(mix_channel(&[0.2f32, 0.4], Some(3), f32_sample), None);
+    assert_eq!(mix_channel::<f32>(&[], None, f32_sample), None);
   }
 
   #[test]
   fn a_partial_trailing_frame_is_not_a_dropped_sample() {
     let (mut producer, mut consumer) = RingBuffer::new(4);
     let dropped = AtomicU64::new(0);
-    push_frames(&[0.25, 0.75, 1.0], 2, &mut producer, &dropped, f32_sample);
+    push_frames(&[0.25, 0.75, 1.0], 2, None, &mut producer, &dropped, f32_sample);
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
     assert!(near(consumer.pop().unwrap(), 0.5));
     assert!(consumer.pop().is_err());

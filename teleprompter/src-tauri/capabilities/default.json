@@ -17,6 +17,7 @@
     "allow-recorder-stop",
     "allow-recorder-status",
     "allow-recorder-cancel",
+    "allow-recorder-list-devices",
     {
       "identifier": "fs:allow-mkdir",
       "allow": [{ "path": "$DOCUMENT/Teleprompter" }]
