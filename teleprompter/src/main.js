@@ -5,6 +5,18 @@ import '@fontsource/literata/latin-400.css'
 import '@fontsource/literata/latin-700.css'
 import './style.css'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import {
+  currentReading,
+  essayIndexByFile,
+  essayStorageRecord,
+  filterEssays,
+  filterImports,
+  itemKey,
+  openTextKey,
+  positionApplies,
+  positionStorageRecord,
+  resolveSelection,
+} from './content-selection.js'
 import { isEssayFile } from './essay-files.js'
 import {
   clearSavedFolder,
@@ -414,31 +426,21 @@ function saveProgressNow() {
   saveProgress()
 }
 
-function itemKey(item) {
-  if (!item) return ''
-  return item.kind === 'import' ? item.id : item.file
-}
-
 function saveProgress() {
   const essay = current()
   if (!essay) return
-  const id = itemKey(essay)
-  writeStorage(
-    ESSAY_KEY,
-    JSON.stringify({
-      file: essay.file,
-      code: essay.code,
-      kind: essay.kind || 'essay',
-      id,
-    }),
-  )
+  const record = essayStorageRecord(essay)
+  writeStorage(ESSAY_KEY, JSON.stringify(record))
   const metric = lineMetrics[activeIndex]
   if (metric && offsetCache.height) {
     const fraction = fractionAtOffset(metric.top, metric.height)
-    writeStorage(POSITION_KEY, JSON.stringify({ index: activeIndex, fraction, id }))
+    writeStorage(
+      POSITION_KEY,
+      JSON.stringify(positionStorageRecord({ index: activeIndex, fraction, id: record.id, useLine: true })),
+    )
     return
   }
-  writeStorage(POSITION_KEY, JSON.stringify({ offset: state.offset, id }))
+  writeStorage(POSITION_KEY, JSON.stringify(positionStorageRecord({ offset: state.offset, id: record.id })))
 }
 
 function tick(now) {
@@ -571,26 +573,7 @@ function setTheme(next) {
 }
 
 function filtered() {
-  const q = state.query.trim().toLowerCase()
-  if (!q) return essays.map((essay, index) => ({ essay, index }))
-  return essays
-    .map((essay, index) => ({ essay, index }))
-    .filter(({ essay }) => `${essay.code} ${essay.title}`.toLowerCase().includes(q))
-}
-
-function asImportEssay(item, index) {
-  const words = `${item.title}\n${item.body}`.split(/\s+/).filter(Boolean).length
-  return {
-    kind: 'import',
-    id: item.id,
-    code: `U${index + 1}`,
-    file: item.id,
-    title: item.title,
-    body: item.body,
-    words,
-    minutes: Math.max(1, Math.round(words / 130)),
-    createdAt: item.createdAt,
-  }
+  return filterEssays(essays, state.query)
 }
 
 function askConfirm({ title, message }) {
@@ -609,46 +592,26 @@ function askConfirm({ title, message }) {
 }
 
 function current() {
-  if (state.kind === 'import') {
-    const index = imports.findIndex((item) => item.id === state.importId)
-    if (index !== -1) return asImportEssay(imports[index], index)
-  }
-  return essays[state.index]
+  return currentReading({
+    kind: state.kind,
+    index: state.index,
+    importId: state.importId,
+    essays,
+    imports,
+  })
 }
 
 function restoreEssay() {
-  const saved = loadJSON(ESSAY_KEY)
-  if (!saved || typeof saved !== 'object') return
-  if (saved.kind === 'import') {
-    const id = typeof saved.id === 'string' ? saved.id : saved.file
-    if (typeof id === 'string' && imports.some((item) => item.id === id)) {
-      state.kind = 'import'
-      state.importId = id
-      return
-    }
-    state.kind = 'essay'
-    state.index = 0
-    state.importId = null
-    return
-  }
-  const byFile = essays.findIndex((item) => item.file === saved.file)
-  if (byFile !== -1) {
-    state.kind = 'essay'
-    state.index = byFile
-    return
-  }
-  const byCode = essays.findIndex((item) => item.code === saved.code)
-  if (byCode !== -1) {
-    state.kind = 'essay'
-    state.index = byCode
-  }
+  const next = resolveSelection({ savedSelection: loadJSON(ESSAY_KEY), essays, imports })
+  if (!next) return
+  state.kind = next.kind
+  if (next.index !== undefined) state.index = next.index
+  if (Object.prototype.hasOwnProperty.call(next, 'importId')) state.importId = next.importId
 }
 
 function restorePosition() {
   const saved = loadJSON(POSITION_KEY)
-  if (!saved || typeof saved !== 'object') return
-  const key = itemKey(current())
-  if (typeof saved.id === 'string' && saved.id !== key) return
+  if (!positionApplies(saved, itemKey(current()))) return
   if (
     Number.isInteger(saved.index) &&
     saved.index >= 0 &&
@@ -774,7 +737,7 @@ function applyEssayList(next) {
     saveProgressNow()
     return
   }
-  const found = essays.findIndex((item) => item.file === currentFile)
+  const found = essayIndexByFile(essays, currentFile)
   if (found === -1) {
     void stopRecordingAndSave()
     state.kind = 'essay'
@@ -1023,8 +986,8 @@ async function useBundledEssays() {
 
 function selectReading({ kind, index = 0, id = null }) {
   void stopRecordingAndSave({ openAfter: false })
-  const prevKey = state.kind === 'import' ? state.importId : essays[state.index]?.file
-  const nextKey = kind === 'import' ? id : essays[index]?.file
+  const prevKey = openTextKey({ kind: state.kind, index: state.index, importId: state.importId, essays })
+  const nextKey = openTextKey({ kind, index, importId: id, essays })
   const changed = prevKey !== nextKey
   if (changed) closeRecorderPanel()
   state.running = false
@@ -1063,10 +1026,7 @@ function setDrawer(open) {
 }
 
 function filteredImports() {
-  const q = state.query.trim().toLowerCase()
-  return imports
-    .map((item, index) => ({ item, index, reading: asImportEssay(item, index) }))
-    .filter(({ item, reading }) => !q || `${reading.code} ${reading.title} ${item.body}`.toLowerCase().includes(q))
+  return filterImports(imports, state.query)
 }
 
 function renderEssayList() {
