@@ -1,30 +1,21 @@
 /**
  * Chooses the capture behind the record button.
- * Native stays off unless the window is Tauri and the dev flag was set at startup.
- * The flag is read once by the composition root; this module does not watch it.
+ * A Tauri window always uses the native recorder. The Vite page, including
+ * Playwright, keeps the MediaRecorder capture.
  */
-import { createCapture } from './recording.js'
+import { createCapture } from '#web-capture'
 import { createNativeRecorder } from './native-recorder.js'
 
-export const NATIVE_RECORDER_KEY = 'tp.nativeRecorder'
 /** One bar per 20 ms, the same window the native writer uses. */
 export const NATIVE_PEAK_STEP_MS = 20
-
-export function readNativeRecorderEnabled(storage) {
-  try {
-    return storage?.getItem(NATIVE_RECORDER_KEY) === '1'
-  } catch {
-    return false
-  }
-}
 
 /** `window.__TAURI__` is present because the shell sets withGlobalTauri. */
 export function hasTauriGlobal(win) {
   return !!win && typeof win === 'object' && !!win.__TAURI__
 }
 
-export function selectRecorderBackend({ hasTauri, nativeEnabled }) {
-  return hasTauri && nativeEnabled ? 'native' : 'web'
+export function selectRecorderBackend({ hasTauri }) {
+  return hasTauri ? 'native' : 'web'
 }
 
 /**
@@ -76,10 +67,10 @@ export function nativeStartError(error) {
 }
 
 /**
- * Native take. The stored take list still expects an M4A blob, so stop does
- * not invent one. Segments are already in Documents/Teleprompter/.sessions,
- * and their paths are written to the console. Pause and resume use the same
- * button states as the web capture. The clock counts recorded time only.
+ * Native take. Stop encodes the session to an M4A file in Documents and
+ * returns that path. The page does not build a second blob. Pause and resume
+ * use the same button states as the web capture. The clock counts recorded
+ * time only.
  */
 export function createNativeCapture({
   onError,
@@ -181,7 +172,7 @@ export function createNativeCapture({
         pendingError = false
         onError?.()
       }
-      return { started: true, mimeType: 'audio/wav', extension: 'wav' }
+      return { started: true, mimeType: 'audio/mp4', extension: 'm4a' }
     } catch (error) {
       phase = 'idle'
       pendingError = false
@@ -269,7 +260,25 @@ export function createNativeCapture({
     return []
   }
 
+  function savedTake(stopped) {
+    const diskPath = typeof stopped?.takePath === 'string' ? stopped.takePath : ''
+    if (!diskPath) return null
+    return {
+      savedToDisk: true,
+      diskPath,
+      name: typeof stopped.takeName === 'string' ? stopped.takeName : '',
+      durationMs: Number(stopped.durationMs) || 0,
+      mimeType: 'audio/mp4',
+      extension: 'm4a',
+    }
+  }
+
   function logTake(stopped) {
+    const saved = savedTake(stopped)
+    if (saved) {
+      console.info(`native recorder m4a ${saved.diskPath} (${saved.durationMs} ms)`)
+      return
+    }
     const paths = segmentPaths(stopped)
     if (!paths.length) return
     const peaks = Array.isArray(stopped.peaks) ? stopped.peaks.length : 0
@@ -300,8 +309,12 @@ export function createNativeCapture({
     }
     phase = 'idle'
     disarm()
+    if (!stopped) {
+      onStopped?.({ failed: true })
+      return null
+    }
     logTake(stopped)
-    onStopped?.(null)
+    onStopped?.(savedTake(stopped))
     return stopped
   }
 

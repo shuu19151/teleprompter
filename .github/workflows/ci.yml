@@ -31,6 +31,14 @@ jobs:
             echo 'production bundle contains __teleprompterTest' >&2
             exit 1
           fi
+      - name: Tauri bundle drops MediaRecorder
+        run: |
+          rm -rf dist
+          TAURI_ENV_PLATFORM=linux npm run build
+          if grep -R -F -q --include='*.js' MediaRecorder dist; then
+            echo 'tauri bundle still contains MediaRecorder' >&2
+            exit 1
+          fi
 
   rust:
     name: Rust (${{ matrix.os }})

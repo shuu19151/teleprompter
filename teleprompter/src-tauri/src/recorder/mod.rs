@@ -14,16 +14,21 @@
 //! file is `seg-000.wav`. Each resume adds `seg-001.wav`, `seg-002.wav`, and
 //! so on. The writer also opens a new segment after 60 seconds of recorded
 //! audio, finalizes the file it just closed, and rewrites `session.json`.
-//! Duration counts written frames only, so the pause is not part of it. A lost
-//! device finalizes the open segment, including while paused, and emits
-//! `recorder://device-lost`.
+//! Duration counts written frames only, so the pause is not part of it. The
+//! writer runs the voice chain (90 Hz highpass, compressor, makeup, limiter)
+//! on each sample it keeps, after it has dropped leading zeros. A lost device
+//! finalizes the open segment, including while paused, and emits
+//! `recorder://device-lost`. Stop and crash-recovery Save encode the segments
+//! to one AAC-LC M4A take and delete the session only after that file checks out.
 
 mod capture;
 mod device;
 mod events;
 mod levels;
+mod m4a;
 mod recovery;
 mod session;
+mod voice;
 mod wav;
 mod writer;
 
@@ -38,14 +43,16 @@ use tauri::{AppHandle, Emitter, Manager, State};
 pub use events::RecorderPhase;
 
 use device::InputDevice;
-use events::{notify_device_lost, DevicesChangedEvent, ErrorEvent, RecorderEmit, StateEvent, StateNotice};
+use events::{
+  DevicesChangedEvent, ErrorEvent, RecorderEmit, StateEvent, StateNotice, notify_device_lost,
+};
 
 /// File sample rate. Device audio at another rate is resampled on the writer thread.
 pub const OUTPUT_SAMPLE_RATE: u32 = 48_000;
 
 const SESSIONS_DIR: &str = ".sessions";
 
-use session::{duration_ms, segment_frames, segment_name, SessionRecord, SessionStore};
+use session::{SessionRecord, SessionStore, duration_ms, segment_frames, segment_name};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecorderError {
@@ -122,6 +129,9 @@ pub struct StopResponse {
   pub bytes: u64,
   pub dropped_samples: u64,
   pub peaks: Vec<f32>,
+  /// Saved take in Documents/Teleprompter. Empty when the take had no samples.
+  pub take_path: String,
+  pub take_name: String,
 }
 
 pub struct RecorderState {
@@ -390,40 +400,63 @@ impl ActiveSession {
 
   fn finish(mut self) -> Result<StopResponse, RecorderError> {
     self.capture.stop();
-    let store = Arc::clone(&self.store);
     let directory = self.directory.clone();
     let emit = Arc::clone(&self.emit);
-    let result = match self.writer.finish() {
-      Ok(done) => {
-        let duration = duration_ms(done.frames);
-        match store.update(|record| {
-          record.state = "stopped".into();
-          record.last_written_ms = duration;
-        }) {
-          Ok(()) => {
-            let names = store.snapshot().map(|record| record.segments).unwrap_or_default();
-            let paths: Vec<String> = names
-              .iter()
-              .map(|name| path_string(&directory.join(name)))
-              .collect();
-            Ok(StopResponse {
-              path: paths.first().cloned().unwrap_or_default(),
-              paths,
-              duration_ms: duration,
-              bytes: done.bytes,
-              dropped_samples: done.dropped_samples,
-              peaks: done.peaks,
-            })
-          }
-          Err(error) => {
-            emit.error(&ErrorEvent::from_recorder(&error));
-            Err(error)
-          }
+    let done = match self.writer.finish() {
+      Ok(done) => done,
+      Err(error) => {
+        emit.state(&StateNotice {
+          state: RecorderPhase::Idle,
+          duration_ms: 0,
+        });
+        return Err(error);
+      }
+    };
+    let names = self
+      .store
+      .snapshot()
+      .map(|record| record.segments)
+      .unwrap_or_default();
+    let paths: Vec<String> = names
+      .iter()
+      .map(|name| path_string(&directory.join(name)))
+      .collect();
+    // Leave the session marked recording until the m4a has been checked.
+    // A failed encode stays on disk for the next launch to save or discard.
+    let result = if done.frames == 0 {
+      let _ = fs::remove_dir_all(&directory);
+      Ok(StopResponse {
+        path: paths.first().cloned().unwrap_or_default(),
+        paths,
+        duration_ms: 0,
+        bytes: 0,
+        dropped_samples: done.dropped_samples,
+        peaks: done.peaks,
+        take_path: String::new(),
+        take_name: String::new(),
+      })
+    } else {
+      match recovery::save_session(&directory, &recovery::takes_dir_for(&directory)) {
+        Ok(saved) => Ok(StopResponse {
+          path: paths.first().cloned().unwrap_or_default(),
+          paths,
+          duration_ms: saved.duration_ms,
+          bytes: saved.bytes,
+          dropped_samples: done.dropped_samples,
+          peaks: done.peaks,
+          take_path: path_string(&saved.path),
+          take_name: saved.name,
+        }),
+        Err(error) => {
+          emit.error(&ErrorEvent::from_recorder(&error));
+          Err(error)
         }
       }
-      Err(error) => Err(error),
     };
-    let duration_ms = result.as_ref().map(|stopped| stopped.duration_ms).unwrap_or(0);
+    let duration_ms = result
+      .as_ref()
+      .map(|stopped| stopped.duration_ms)
+      .unwrap_or(0);
     emit.state(&StateNotice {
       state: RecorderPhase::Idle,
       duration_ms,
@@ -498,7 +531,14 @@ fn prepare_session(
   })?;
   let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
   let segments = vec![segment_name(0)];
-  let record = SessionRecord::new(started_at, text_key, code, title, device_name, segments.clone());
+  let record = SessionRecord::new(
+    started_at,
+    text_key,
+    code,
+    title,
+    device_name,
+    segments.clone(),
+  );
   let store = match SessionStore::create(directory.clone(), record) {
     Ok(store) => store,
     Err(error) => {
@@ -814,7 +854,10 @@ mod tests {
     assert!(matches!(again, RecorderError::AlreadyRecording));
     let status = recorder.status();
     assert_eq!(status.state, RecorderPhase::Recording);
-    assert_eq!(status.session_id.as_deref(), Some(started.session_id.as_str()));
+    assert_eq!(
+      status.session_id.as_deref(),
+      Some(started.session_id.as_str())
+    );
     let sessions = session_dirs(dir.path());
     assert_eq!(sessions.len(), 1);
     recorder.cancel().unwrap();
@@ -849,15 +892,13 @@ mod tests {
     assert_eq!(recorder.status().state, RecorderPhase::Idle);
     assert_eq!(stopped.dropped_samples, 6);
     assert_eq!(stopped.duration_ms, duration_ms(4));
-    assert_eq!(stopped.bytes, 44 + 8);
+    assert!(stopped.bytes > 32);
     assert_eq!(stopped.peaks.len(), 1);
-    assert_eq!(stopped.paths, vec![path_string(&session_path.join(segment_name(0)))]);
+    assert_eq!(stopped.paths, vec![path_string(
+      &session_path.join(segment_name(0))
+    )]);
     assert_eq!(stopped.path, stopped.paths[0]);
-    let after: serde_json::Value =
-      serde_json::from_slice(&fs::read(session_path.join(session::SESSION_FILE)).unwrap()).unwrap();
-    assert_eq!(after["state"], "stopped");
-    let reader = hound::WavReader::open(&session_path.join(segment_name(0))).unwrap();
-    assert_eq!(reader.duration(), 4);
+    assert_saved_take(&stopped, 4);
   }
 
   #[test]
@@ -895,9 +936,13 @@ mod tests {
       .unwrap();
     let stopped = recorder.stop().unwrap();
     assert_eq!(stopped.peaks.len(), 5);
-    for value in &stopped.peaks {
-      assert!((value - 0.625).abs() < 1.0e-5, "peak {value}");
-    }
+    assert!(
+      stopped
+        .peaks
+        .iter()
+        .all(|value| (0.0..=1.0).contains(value))
+    );
+    assert!(stopped.peaks.iter().any(|value| *value > 0.0));
     let states = emit.states.lock().unwrap();
     assert_eq!(states.len(), 2);
     assert_eq!(states[0].state, RecorderPhase::Recording);
@@ -928,10 +973,12 @@ mod tests {
         Arc::clone(&emit) as Arc<dyn RecorderEmit>,
       )
       .unwrap();
-    assert!(recorder
-      .finalize_if_lost(&["test-input"])
-      .unwrap()
-      .is_none());
+    assert!(
+      recorder
+        .finalize_if_lost(&["test-input"])
+        .unwrap()
+        .is_none()
+    );
     assert_eq!(recorder.status().state, RecorderPhase::Recording);
 
     recorder
@@ -940,10 +987,7 @@ mod tests {
       .unwrap()
       .fault
       .store(true, Ordering::Release);
-    let stopped = recorder
-      .finalize_if_lost(&["test-input"])
-      .unwrap()
-      .unwrap();
+    let stopped = recorder.finalize_if_lost(&["test-input"]).unwrap().unwrap();
     assert_eq!(recorder.status().state, RecorderPhase::Idle);
     assert!(recorder.finalize_if_lost(&[] as &[&str]).unwrap().is_none());
     let lost = emit.lost.lock().unwrap();
@@ -951,26 +995,7 @@ mod tests {
     assert_eq!(lost[0].device_id, "test-input");
     drop(lost);
 
-    let wav_path = std::path::PathBuf::from(&stopped.path);
-    let mut reader = hound::WavReader::open(&wav_path).unwrap();
-    let spec = reader.spec();
-    assert_eq!(spec.channels, 1);
-    assert_eq!(spec.sample_rate, OUTPUT_SAMPLE_RATE);
-    assert_eq!(spec.bits_per_sample, 16);
-    assert_eq!(reader.duration(), samples.len() as u32);
-    let pcm: Vec<i16> = reader.samples::<i16>().map(|sample| sample.unwrap()).collect();
-    assert_eq!(
-      pcm,
-      samples
-        .iter()
-        .copied()
-        .map(super::wav::f32_to_i16)
-        .collect::<Vec<_>>()
-    );
-    let session_path = wav_path.parent().unwrap();
-    let meta: serde_json::Value =
-      serde_json::from_slice(&fs::read(session_path.join(session::SESSION_FILE)).unwrap()).unwrap();
-    assert_eq!(meta["state"], "stopped");
+    assert_saved_take(&stopped, samples.len() as u64);
   }
 
   #[test]
@@ -995,9 +1020,7 @@ mod tests {
     assert_eq!(recorder.status().state, RecorderPhase::Idle);
     assert_eq!(emit.lost.lock().unwrap().len(), 1);
     assert_eq!(emit.lost.lock().unwrap()[0].device_id, "test-input");
-    let reader = hound::WavReader::open(&stopped.path).unwrap();
-    assert_eq!(reader.duration(), samples.len() as u32);
-    assert_eq!(reader.spec().sample_rate, OUTPUT_SAMPLE_RATE);
+    assert_saved_take(&stopped, samples.len() as u64);
   }
 
   #[test]
@@ -1015,7 +1038,10 @@ mod tests {
 
     recorder.pause().unwrap();
     assert_eq!(recorder.status().state, RecorderPhase::Paused);
-    assert!(matches!(recorder.pause(), Err(RecorderError::AlreadyPaused)));
+    assert!(matches!(
+      recorder.pause(),
+      Err(RecorderError::AlreadyPaused)
+    ));
 
     recorder.resume().unwrap();
     assert_eq!(recorder.status().state, RecorderPhase::Recording);
@@ -1052,7 +1078,10 @@ mod tests {
     let paused = recorder.pause().unwrap();
     assert_eq!(paused.state, RecorderPhase::Paused);
     assert_eq!(paused.duration_ms, 100);
-    assert_eq!(paused.session_id.as_deref(), Some(started.session_id.as_str()));
+    assert_eq!(
+      paused.session_id.as_deref(),
+      Some(started.session_id.as_str())
+    );
     assert_eq!(recorder.status().state, RecorderPhase::Paused);
     assert_eq!(recorder.status().duration_ms, 100);
     let during = read_session(&session_path);
@@ -1083,12 +1112,8 @@ mod tests {
     assert_eq!(stopped.path, stopped.paths[0]);
     assert!(stopped.paths[0].ends_with("seg-000.wav"));
     assert!(stopped.paths[1].ends_with("seg-001.wav"));
-    assert_eq!(stopped.bytes, (44 + 4_800 * 2) * 2);
-    assert_eq!(read_pcm(Path::new(&stopped.paths[0])), pcm_of(&first));
-    assert_eq!(read_pcm(Path::new(&stopped.paths[1])), pcm_of(&second));
-    let after = read_session(&session_path);
-    assert_eq!(after["state"], "stopped");
-    assert_eq!(after["segments"].as_array().unwrap().len(), 2);
+    assert!(stopped.bytes > 32);
+    assert_saved_take(&stopped, 9_600);
 
     let states = emit.states.lock().unwrap();
     assert_eq!(
@@ -1136,21 +1161,7 @@ mod tests {
     let stopped = recorder.stop().unwrap();
     assert_eq!(stopped.paths.len(), 3);
     assert_eq!(stopped.duration_ms, duration_ms(samples.len() as u64));
-    let lengths = [8u32, 8, 4];
-    let mut joined = Vec::new();
-    for (path, length) in stopped.paths.iter().zip(lengths) {
-      let mut reader = hound::WavReader::open(path).unwrap();
-      assert_eq!(reader.duration(), length);
-      joined.extend(reader.samples::<i16>().map(|sample| sample.unwrap()));
-    }
-    assert_eq!(joined, pcm_of(&samples));
-    let after = read_session(&session_path);
-    assert_eq!(after["state"], "stopped");
-    assert_eq!(
-      after["segments"],
-      serde_json::json!(["seg-000.wav", "seg-001.wav", "seg-002.wav"])
-    );
-    assert_eq!(after["lastWrittenMs"], duration_ms(samples.len() as u64));
+    assert_saved_take(&stopped, samples.len() as u64);
     assert!(!session_path.join("session.json.tmp").exists());
   }
 
@@ -1182,18 +1193,7 @@ mod tests {
     assert_eq!(emit.lost.lock().unwrap()[0].device_id, "test-input");
     assert_eq!(stopped.paths.len(), 1);
     assert_eq!(stopped.duration_ms, duration_ms(samples.len() as u64));
-    assert_eq!(read_pcm(Path::new(&stopped.paths[0])), pcm_of(&samples));
-    let session_path = Path::new(&stopped.paths[0]).parent().unwrap();
-    let meta = read_session(session_path);
-    assert_eq!(meta["state"], "stopped");
-    assert_eq!(meta["segments"], serde_json::json!(["seg-000.wav"]));
-
-    let reader = hound::WavReader::open(&stopped.paths[0]).unwrap();
-    let spec = reader.spec();
-    assert_eq!(spec.channels, 1);
-    assert_eq!(spec.sample_rate, OUTPUT_SAMPLE_RATE);
-    assert_eq!(spec.bits_per_sample, 16);
-    assert_eq!(reader.duration(), samples.len() as u32);
+    assert_saved_take(&stopped, samples.len() as u64);
   }
 
   #[test]
@@ -1218,12 +1218,9 @@ mod tests {
       .unwrap()
       .fault
       .store(true, Ordering::Release);
-    let stopped = recorder
-      .finalize_if_lost(&["test-input"])
-      .unwrap()
-      .unwrap();
+    let stopped = recorder.finalize_if_lost(&["test-input"]).unwrap().unwrap();
     assert_eq!(recorder.status().state, RecorderPhase::Idle);
-    assert_eq!(read_pcm(Path::new(&stopped.path)), pcm_of(&samples));
+    assert_saved_take(&stopped, samples.len() as u64);
     assert_eq!(emit.lost.lock().unwrap().len(), 1);
   }
 
@@ -1327,7 +1324,14 @@ mod tests {
       )?;
       let (mut producer, consumer) = rtrb::RingBuffer::new(capacity.max(1));
       let dropped = Arc::new(AtomicU64::new(0));
-      capture::push_frames(samples, 1, None, &mut producer, &dropped, capture::f32_sample);
+      capture::push_frames(
+        samples,
+        1,
+        None,
+        &mut producer,
+        &dropped,
+        capture::f32_sample,
+      );
       drop(producer);
       let written = Arc::new(AtomicU64::new(0));
       let fault = Arc::new(AtomicBool::new(false));
@@ -1428,7 +1432,9 @@ mod tests {
 
   fn push_all(producer: &mut rtrb::Producer<f32>, samples: &[f32]) {
     for sample in samples {
-      producer.push(*sample).expect("the test ring holds the fixture");
+      producer
+        .push(*sample)
+        .expect("the test ring holds the fixture");
     }
   }
 
@@ -1436,13 +1442,23 @@ mod tests {
     serde_json::from_slice(&fs::read(directory.join(session::SESSION_FILE)).unwrap()).unwrap()
   }
 
-  fn read_pcm(path: &Path) -> Vec<i16> {
-    let mut reader = hound::WavReader::open(path).unwrap();
-    reader.samples::<i16>().map(|sample| sample.unwrap()).collect()
-  }
-
-  fn pcm_of(samples: &[f32]) -> Vec<i16> {
-    samples.iter().copied().map(wav::f32_to_i16).collect()
+  fn assert_saved_take(stopped: &StopResponse, frames: u64) {
+    assert!(stopped.take_name.ends_with(".m4a"), "{}", stopped.take_name);
+    assert!(!stopped.take_path.is_empty());
+    assert_eq!(stopped.duration_ms, duration_ms(frames));
+    if let Some(segment) = stopped.paths.first() {
+      assert!(
+        !Path::new(segment).exists(),
+        "session was kept after the m4a was saved: {segment}"
+      );
+    }
+    let bytes = fs::read(&stopped.take_path).unwrap();
+    super::m4a::verify_m4a(&bytes, frames).unwrap();
+    let sidecar = Path::new(&stopped.take_path).with_extension("json");
+    let meta: serde_json::Value = serde_json::from_slice(&fs::read(sidecar).unwrap()).unwrap();
+    assert_eq!(meta["mime"], "audio/mp4");
+    assert_eq!(meta["version"], 1);
+    assert_eq!(meta["durationMs"], duration_ms(frames));
   }
 
   #[derive(Default)]
