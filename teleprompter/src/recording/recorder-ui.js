@@ -13,6 +13,7 @@ import { createWaveformView } from './waveform-view.js'
 
 export function createRecorder(deps) {
   let recorder
+  let ui
 
   const microphone = createMicrophoneController({
     getCapture: () => recorder.capture,
@@ -25,9 +26,10 @@ export function createRecorder(deps) {
           }
         : null,
     onDeviceLost: (payload) => recorder.onDeviceLost(payload),
+    onInputDeviceFound: () => ui?.noteDeviceReturned(),
   })
 
-  const ui = createRecorderView({
+  ui = createRecorderView({
     getVoiceEnhance: () => microphone.isVoiceEnhance(),
     getPanelMode: () => recorder.getMode(),
     getCapturePhase: () => recorder.capture.phase,
@@ -52,7 +54,6 @@ export function createRecorder(deps) {
     stopRecordingAndSave: (options) => recorder.stopRecordingAndSave(options),
     openPlayback: (take) => recorder.openPlayback(take),
     togglePlayback: () => recorder.togglePlayback(),
-    showRecMessage: (message) => ui.showRecMessage(message),
     deps,
   })
 

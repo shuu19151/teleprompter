@@ -12,10 +12,8 @@ import {
   takeDateIso,
   takeTextKey,
 } from './recorder-math.js'
+import { DELETE_TAKE_MESSAGE, SHOW_TAKE_MESSAGE } from './rec-messages.js'
 import { revealTakeFile } from './take-disk.js'
-
-const DELETE_TAKE_MESSAGE = 'Could not delete this take.'
-const SHOW_TAKE_MESSAGE = 'Could not show that file.'
 
 export function createTakeList({
   getPanelMode,
@@ -25,7 +23,6 @@ export function createTakeList({
   stopRecordingAndSave,
   openPlayback,
   togglePlayback,
-  showRecMessage,
   deps,
 }) {
   let takesToken = 0
@@ -106,7 +103,7 @@ export function createTakeList({
     try {
       await removeTake(id)
     } catch {
-      showRecMessage(DELETE_TAKE_MESSAGE)
+      deps.showNotice(DELETE_TAKE_MESSAGE)
       return
     }
     if (getPlayback()?.take?.id === id) closeRecorderPanel()

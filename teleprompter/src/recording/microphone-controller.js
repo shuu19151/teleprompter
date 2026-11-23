@@ -2,13 +2,14 @@
  * Microphone choice, the getUserMedia start, and the analyser graph.
  * The waveform reads the analyser this module exposes and does not own it.
  */
+import { DEVICE_LOST_MESSAGE } from './rec-messages.js'
 import { micAudioConstraints } from './recording.js'
 import { micControlState } from './recorder-math.js'
 
+export { DEVICE_LOST_MESSAGE }
+
 const MIC_KEY = 'teleprompter:micId'
 const VOICE_KEY = 'teleprompter:voiceEnhance'
-
-export const DEVICE_LOST_MESSAGE = 'The microphone was disconnected. Recording stopped.'
 
 /** Native devices, default first, in the shape the existing menu already renders. */
 export function nativeMicOptions(devices) {
@@ -29,11 +30,17 @@ export function nativeMicOptions(devices) {
   return listed
 }
 
-export function applyDeviceLost({ active, finish, showNotice, showRecMessage }) {
-  showNotice?.(DEVICE_LOST_MESSAGE)
+export function applyDeviceLost({ active, finish, showRecMessage }) {
   showRecMessage?.(DEVICE_LOST_MESSAGE)
   if (active) return finish?.({ openAfter: false })
   return undefined
+}
+
+/** True when the web device list or the native device list contains an input. */
+export function foundInputDevice(devices, { native = false } = {}) {
+  const rows = Array.isArray(devices) ? devices : []
+  if (native) return nativeMicOptions(rows).length > 0
+  return rows.some((device) => device?.kind === 'audioinput')
 }
 
 export function isMissingMicError(error) {
@@ -82,7 +89,13 @@ function loadJSON(key) {
   }
 }
 
-export function createMicrophoneController({ getCapture, getPanelMode, nativeDevices = null, onDeviceLost } = {}) {
+export function createMicrophoneController({
+  getCapture,
+  getPanelMode,
+  nativeDevices = null,
+  onDeviceLost,
+  onInputDeviceFound,
+} = {}) {
   let audioCtx = null
   let analyser = null
   let waveSource = null
@@ -228,6 +241,7 @@ export function createMicrophoneController({ getCapture, getPanelMode, nativeDev
     // shows the default until the reader picks a native microphone.
     audioInputs = nativeMicOptions(devices)
     renderMicSelects()
+    if (foundInputDevice(devices, { native: true })) onInputDeviceFound?.()
   }
 
   async function watchNativeDevices() {
@@ -263,6 +277,7 @@ export function createMicrophoneController({ getCapture, getPanelMode, nativeDev
     audioInputs = listed.inputs
     if (listed.labeled && micId && !audioInputs.some((device) => device.deviceId === micId)) saveMicId('')
     renderMicSelects()
+    if (foundInputDevice(devices)) onInputDeviceFound?.()
   }
 
   function onMicChange(event) {

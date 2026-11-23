@@ -973,6 +973,9 @@ html.is-reading-fullscreen .mic-row {
 }
 
 .rec-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   margin: 0;
   padding: 8px 10px;
   border: 1.5px solid var(--rust);
@@ -981,6 +984,23 @@ html.is-reading-fullscreen .mic-row {
   color: var(--ink);
   font-size: 13px;
   line-height: 1.45;
+}
+
+.rec-message[hidden] { display: none; }
+
+.rec-message-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rec-message-dismiss {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  width: auto;
+  height: auto;
+  margin: 0 0 0 auto;
+  padding: 0 4px;
+  line-height: 1.2;
 }
 
 .transport > .rec-message { flex: 1 0 100%; }
@@ -1008,7 +1028,7 @@ html.is-reading-fullscreen .mic-row {
 
 .stage-frame.is-fullscreen .rec-stage-message:not([hidden]),
 .stage-frame:fullscreen .rec-stage-message:not([hidden]) {
-  display: block;
+  display: flex;
 }
 
 .takes-head { margin-top: 22px; }

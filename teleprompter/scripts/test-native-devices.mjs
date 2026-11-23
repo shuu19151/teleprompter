@@ -199,8 +199,7 @@ test('the web microphone list still comes from enumerateDevices', async () => {
   }
 })
 
-test('a lost device stops the take and uses the existing notice', () => {
-  const notices = []
+test('a lost device stops the take and keeps only the inline message', () => {
   const messages = []
   const finishes = []
   assert.equal(
@@ -211,7 +210,7 @@ test('a lost device stops the take and uses the existing notice', () => {
         return 'stopped'
       },
       showNotice(message) {
-        notices.push(message)
+        messages.push(`notice:${message}`)
       },
       showRecMessage(message) {
         messages.push(message)
@@ -219,7 +218,6 @@ test('a lost device stops the take and uses the existing notice', () => {
     }),
     'stopped',
   )
-  assert.deepEqual(notices, [DEVICE_LOST_MESSAGE])
   assert.deepEqual(messages, [DEVICE_LOST_MESSAGE])
   assert.deepEqual(finishes, [{ openAfter: false }])
   assert.match(DEVICE_LOST_MESSAGE, /microphone was disconnected/i)
@@ -231,14 +229,11 @@ test('a lost device stops the take and uses the existing notice', () => {
       finish() {
         idle.push('finish')
       },
-      showNotice(message) {
-        idle.push(message)
-      },
       showRecMessage(message) {
         idle.push(message)
       },
     }),
     undefined,
   )
-  assert.deepEqual(idle, [DEVICE_LOST_MESSAGE, DEVICE_LOST_MESSAGE])
+  assert.deepEqual(idle, [DEVICE_LOST_MESSAGE])
 })

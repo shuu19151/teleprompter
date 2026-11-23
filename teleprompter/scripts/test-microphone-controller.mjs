@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { isMissingMicError, listedAudioInputs } from '../src/recording/microphone-controller.js'
+import { foundInputDevice, isMissingMicError, listedAudioInputs } from '../src/recording/microphone-controller.js'
 
 test('a missing microphone is the overconstrained and not-found errors', () => {
   assert.equal(isMissingMicError({ name: 'OverconstrainedError' }), true)
@@ -19,6 +19,20 @@ test('microphone menu stays on Default until a device has a label', () => {
       { kind: 'videoinput', deviceId: 'cam', label: 'Camera' },
     ]),
     { labeled: false, inputs: [] },
+  )
+})
+
+test('a returning microphone is an audio input, or a native device with an id', () => {
+  assert.equal(foundInputDevice(null), false)
+  assert.equal(foundInputDevice([]), false)
+  assert.equal(foundInputDevice([{ kind: 'audiooutput', deviceId: 'speakers', label: 'Speakers' }]), false)
+  assert.equal(foundInputDevice([{ kind: 'audioinput', deviceId: '', label: '' }]), true)
+  assert.equal(foundInputDevice([{ kind: 'audioinput', deviceId: 'mic-a', label: 'Desk mic' }]), true)
+  assert.equal(foundInputDevice([], { native: true }), false)
+  assert.equal(foundInputDevice([{ id: '', name: 'No id', isDefault: true }], { native: true }), false)
+  assert.equal(
+    foundInputDevice([{ id: 'wasapi:{usb}', name: 'USB mic', isDefault: true }], { native: true }),
+    true,
   )
 })
 
