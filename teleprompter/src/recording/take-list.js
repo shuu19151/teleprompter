@@ -2,7 +2,6 @@
  * Takes for the open text: render the list, play a row, and delete it.
  * A Tauri take that was saved to Documents can be shown in the folder.
  */
-import { bridge } from '../ui-bridge.js'
 import { inTauri } from '../library/essay-folder.js'
 import { elementFromEvent, openRowMenu } from '../shared/row-menu.js'
 import { listTakes, removeTake } from './recording.js'
@@ -27,6 +26,7 @@ export function createTakeList({
   openPlayback,
   togglePlayback,
   showRecMessage,
+  deps,
 }) {
   let takesToken = 0
   let shownTakes = []
@@ -53,10 +53,10 @@ export function createTakeList({
     const on = getPanelMode() === 'playback' && playback?.take?.id === take.id
     return `
     <li class="take-row ${on ? 'is-on' : ''}" data-take-id="${take.id}">
-      <button class="take-select" type="button" aria-pressed="${on ? 'true' : 'false'}" ${on ? 'aria-current="true"' : ''} aria-label="Play take from ${bridge.escapeAttr(when)}, ${bridge.escapeAttr(duration)}">
+      <button class="take-select" type="button" aria-pressed="${on ? 'true' : 'false'}" ${on ? 'aria-current="true"' : ''} aria-label="Play take from ${deps.escapeAttr(when)}, ${deps.escapeAttr(duration)}">
         <span class="take-meta">
-          <time${iso ? ` datetime="${bridge.escapeAttr(iso)}"` : ''}>${bridge.escapeHtml(when)}</time>
-          <span class="take-duration">${bridge.escapeHtml(duration)}</span>
+          <time${iso ? ` datetime="${deps.escapeAttr(iso)}"` : ''}>${deps.escapeHtml(when)}</time>
+          <span class="take-duration">${deps.escapeHtml(duration)}</span>
         </span>
       </button>
     </li>`
@@ -65,7 +65,7 @@ export function createTakeList({
   async function renderTakes() {
     const list = document.querySelector('#takes-list')
     if (!list) return
-    const key = takeTextKey(bridge.current())
+    const key = takeTextKey(deps.current())
     const token = ++takesToken
     let rows = []
     try {
@@ -76,9 +76,9 @@ export function createTakeList({
       list.innerHTML = '<li class="empty">Could not load takes.</li>'
       return
     }
-    if (token !== takesToken || !list.isConnected || takeTextKey(bridge.current()) !== key) return
+    if (token !== takesToken || !list.isConnected || takeTextKey(deps.current()) !== key) return
     try {
-      rows = chooseTakes(rows, bridge.current())
+      rows = chooseTakes(rows, deps.current())
       shownTakes = rows
       if (!rows.length) {
         list.innerHTML = '<li class="empty">No takes yet.</li>'
@@ -98,7 +98,7 @@ export function createTakeList({
     if (!take) return
     const when = formatTakeWhen(take.createdAt)
     const duration = formatTakeDuration(take.durationMs)
-    const accepted = await bridge.askConfirm({
+    const accepted = await deps.askConfirm({
       title: 'Delete take?',
       message: when ? `Delete the take from ${when} (${duration})?` : `Delete this take (${duration})?`,
     })
@@ -155,7 +155,7 @@ export function createTakeList({
     try {
       await revealTakeFile(take.diskPath)
     } catch {
-      bridge.showNotice(SHOW_TAKE_MESSAGE)
+      deps.showNotice(SHOW_TAKE_MESSAGE)
     }
   }
 

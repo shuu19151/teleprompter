@@ -2,7 +2,6 @@
  * Record, stop, and save a take. The capture in recording.js remuxes AAC
  * into one M4A file, and take-disk.js writes the Documents copy.
  */
-import { bridge } from '../ui-bridge.js'
 import { saveTakeToDocuments } from './take-disk.js'
 import {
   addTake,
@@ -49,7 +48,7 @@ function loadRecWithRun() {
   return true
 }
 
-export function createRecorderController({ microphone, ui, wave, takes }) {
+export function createRecorderController({ microphone, ui, wave, takes, deps }) {
   let recWithRun = loadRecWithRun()
   let recordingMeta = null
   let saveTask = null
@@ -78,7 +77,7 @@ export function createRecorderController({ microphone, ui, wave, takes }) {
   }
 
   function takeMeta() {
-    return buildTakeMeta(bridge.current())
+    return buildTakeMeta(deps.current())
   }
 
   function syncRecorderToRun() {
@@ -88,7 +87,7 @@ export function createRecorderController({ microphone, ui, wave, takes }) {
       ui.syncRecUi()
       return
     }
-    if (bridge.isRunning()) {
+    if (deps.isRunning()) {
       manualHold = false
       capture.resume()
     } else capture.pause()
@@ -164,7 +163,7 @@ export function createRecorderController({ microphone, ui, wave, takes }) {
       .then(async (saved) => {
         saved.livePeaks = exported.peaks
         saved.livePeakOrigin = exported.origin
-        const sameText = takeTextKey(bridge.current()) === meta.textKey
+        const sameText = takeTextKey(deps.current()) === meta.textKey
         if (sameText) {
           await takes.renderTakes()
           if (openAfterSave) await openPlayback(saved)
@@ -256,7 +255,7 @@ export function createRecorderController({ microphone, ui, wave, takes }) {
       return
     }
     wave.startWaveLoop()
-    if (recWithRun) bridge.playRun()
+    if (recWithRun) deps.playRun()
     ui.syncRecUi()
     if (capture.stream) void microphone.refreshAudioInputs()
   }
@@ -265,7 +264,7 @@ export function createRecorderController({ microphone, ui, wave, takes }) {
     if (!capture.isActive()) return Promise.resolve(null)
     const pauseWith = recWithRun
     const task = stopRecordingAndSave(options)
-    if (pauseWith) bridge.pauseRun()
+    if (pauseWith) deps.pauseRun()
     return task
   }
 
@@ -278,7 +277,7 @@ export function createRecorderController({ microphone, ui, wave, takes }) {
     if (capture.phase !== 'recording') return
     if (recWithRun) {
       manualHold = false
-      bridge.pauseRun()
+      deps.pauseRun()
       return
     }
     manualHold = true
@@ -289,7 +288,7 @@ export function createRecorderController({ microphone, ui, wave, takes }) {
   function resumeRecordingFromPanel() {
     if (capture.phase !== 'paused') return
     manualHold = false
-    if (recWithRun) bridge.playRun()
+    if (recWithRun) deps.playRun()
     else {
       capture.resume()
       ui.syncRecUi()

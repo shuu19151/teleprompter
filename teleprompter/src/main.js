@@ -16,43 +16,11 @@ import { createReaderLayout } from './reading/reader-layout.js'
 import { createReaderProgress } from './reading/reader-progress.js'
 import { createReaderView } from './reading/reader-view.js'
 import { warmRecordingStore } from './recording/recording.js'
-import {
-  bindWavePointer,
-  closeRecorderPanel,
-  finishRecording,
-  isRecWithRun,
-  onMicChange,
-  onRecWithRunChange,
-  onTakesClick,
-  onTakesContextMenu,
-  onTakesMenuKey,
-  onThemeChange,
-  onVoiceEnhanceChange,
-  paintPlayback,
-  paintRecording,
-  pauseRecordingFromPanel,
-  recorderMode,
-  recorderPanelHtml,
-  recorderPaused,
-  recordingActive,
-  refreshAudioInputs,
-  renderMicSelects,
-  renderTakes,
-  resetRulerTrack,
-  restoreRecorderPanel,
-  resumeRecordingFromPanel,
-  stopRecordingAndSave,
-  syncRecUi,
-  syncRecorderToRun,
-  togglePlayback,
-  toggleRecording,
-  voiceEnhanceControl,
-} from './recording/recorder-ui.js'
+import { createRecorder } from './recording/recorder-ui.js'
 import { createConfirmDialog } from './shell/confirm-dialog.js'
 import { createFullscreen } from './shell/fullscreen.js'
 import { showNotice } from './shell/notifications.js'
 import { bindThemeToggle, readThemeStorage, theme } from './shell/theme.js'
-import { bridge } from './ui-bridge.js'
 
 const LEGACY_KEYS = {
   [SPEED_KEY]: 'office-essay:speed',
@@ -119,30 +87,18 @@ function escapeAttr(value) {
   return escapeHtml(value)
 }
 
-const recording = {
-  bindWavePointer,
-  closeRecorderPanel,
-  finishRecording,
-  isRecWithRun,
-  onMicChange,
-  onRecWithRunChange,
-  onVoiceEnhanceChange,
-  paintPlayback,
-  paintRecording,
-  pauseRecordingFromPanel,
-  recorderMode,
-  recorderPanelHtml,
-  recorderPaused,
-  renderMicSelects,
-  renderTakes,
-  resetRulerTrack,
-  restoreRecorderPanel,
-  resumeRecordingFromPanel,
-  syncRecUi,
-  togglePlayback,
-  toggleRecording,
-  voiceEnhanceControl,
-}
+const confirmDialog = createConfirmDialog()
+
+const recorder = createRecorder({
+  isRunning: () => reader.isRunning(),
+  pauseRun: () => reader.pauseRun(),
+  playRun: () => reader.playRun(),
+  current: () => library.current(),
+  escapeHtml,
+  escapeAttr,
+  askConfirm: (options) => confirmDialog.askConfirm(options),
+  showNotice,
+})
 
 const layout = createReaderLayout({
   loadJSON,
@@ -199,7 +155,7 @@ const view = createReaderView({
   scrollBy: (distance) => reader.scrollBy(distance),
   toTop: () => reader.toTop(),
   toggleFullscreen: () => fullscreen.toggleFullscreen(),
-  recording,
+  recording: recorder,
 })
 
 const reader = createReaderController({
@@ -209,8 +165,8 @@ const reader = createReaderController({
   layout,
   progress,
   view,
-  syncRecorderToRun,
-  toggleRecording,
+  syncRecorderToRun: recorder.syncRecorderToRun,
+  toggleRecording: recorder.toggleRecording,
   onEscape: () => fullscreen.onEscape(),
   toggleFullscreen: () => fullscreen.toggleFullscreen(),
 })
@@ -220,19 +176,17 @@ const fullscreen = createFullscreen({
     layout.invalidateAnchor()
     layout.measure()
     reader.applyOffset()
-    if (recorderMode() === 'recording') paintRecording()
-    else if (recorderMode() === 'playback') paintPlayback()
+    if (recorder.recorderMode() === 'recording') recorder.paintRecording()
+    else if (recorder.recorderMode() === 'playback') recorder.paintPlayback()
   },
 })
-
-const confirmDialog = createConfirmDialog()
 
 const library = createLibrary({
   bundledEssays,
   loadJSON,
   deps: {
-    stopRecordingAndSave,
-    closeRecorderPanel,
+    stopRecordingAndSave: recorder.stopRecordingAndSave,
+    closeRecorderPanel: recorder.closeRecorderPanel,
     saveProgressNow: progress.saveProgressNow,
     renderSheet: view.renderSheet,
     restorePosition: progress.restorePosition,
@@ -291,15 +245,6 @@ const sidebar = createSidebar({
   openEditDialog: (id) => importDialog.openEditDialog(id),
 })
 
-bridge.isRunning = () => reader.isRunning()
-bridge.pauseRun = reader.pauseRun
-bridge.playRun = reader.playRun
-bridge.current = () => library.current()
-bridge.escapeHtml = escapeHtml
-bridge.escapeAttr = escapeAttr
-bridge.askConfirm = confirmDialog.askConfirm
-bridge.showNotice = showNotice
-
 readThemeStorage()
 
 function mount() {
@@ -325,11 +270,11 @@ ${importDialog.markup()}
 ${confirmDialog.markup()}
   `
   sidebar.bind()
-  bindThemeToggle({ onThemeChange })
+  bindThemeToggle({ onThemeChange: recorder.onThemeChange })
   const takesList = document.querySelector('#takes-list')
-  takesList?.addEventListener('click', onTakesClick)
-  takesList?.addEventListener('contextmenu', onTakesContextMenu)
-  takesList?.addEventListener('keydown', onTakesMenuKey)
+  takesList?.addEventListener('click', recorder.onTakesClick)
+  takesList?.addEventListener('contextmenu', recorder.onTakesContextMenu)
+  takesList?.addEventListener('keydown', recorder.onTakesMenuKey)
   confirmDialog.bind()
   importDialog.bind()
   sidebar.renderList()
@@ -346,7 +291,7 @@ async function start() {
       }
       closing = true
       progress.saveProgressNow()
-      await stopRecordingAndSave({ openAfter: false })
+      await recorder.stopRecordingAndSave({ openAfter: false })
     }).catch((error) => console.error('Could not listen for window close requests.', error))
   }
   await library.bootFolder()
@@ -354,9 +299,9 @@ async function start() {
   void warmRecordingStore()
   layout.syncScriptSize()
   mount()
-  void refreshAudioInputs()
+  void recorder.refreshAudioInputs()
   navigator.mediaDevices?.addEventListener?.('devicechange', () => {
-    void refreshAudioInputs()
+    void recorder.refreshAudioInputs()
   })
   reader.remeasureWhenFontsReady()
 }
@@ -365,7 +310,7 @@ void start()
 
 function onPageLeave() {
   progress.saveProgressNow()
-  if (recordingActive()) void stopRecordingAndSave()
+  if (recorder.recordingActive()) void recorder.stopRecordingAndSave()
 }
 
 document.addEventListener('visibilitychange', () => {
