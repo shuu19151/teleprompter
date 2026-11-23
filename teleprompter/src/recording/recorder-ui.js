@@ -1,173 +1,160 @@
 /**
- * Recorder composition root. main.js keeps importing this module.
+ * Recorder composition root. main.js creates this once and passes the
+ * reader, library, and shell callbacks it needs.
  */
+import { warmRecordingStore } from './recording.js'
 import { createMicrophoneController } from './microphone-controller.js'
 import { createRecorderController } from './recorder-controller.js'
 import { createRecorderView } from './recorder-view.js'
 import { createTakeList } from './take-list.js'
 import { createWaveformView } from './waveform-view.js'
 
-let recorder
+export function createRecorder(deps) {
+  let recorder
 
-const microphone = createMicrophoneController({
-  getCapture: () => recorder.capture,
-  getPanelMode: () => recorder.getMode(),
-})
+  const microphone = createMicrophoneController({
+    getCapture: () => recorder.capture,
+    getPanelMode: () => recorder.getMode(),
+  })
 
-const ui = createRecorderView({
-  getVoiceEnhance: () => microphone.isVoiceEnhance(),
-  getPanelMode: () => recorder.getMode(),
-  getCapturePhase: () => recorder.capture.phase,
-  getPlayback: () => recorder.getPlayback(),
-  syncMicControls: () => microphone.syncMicControls(),
-})
+  const ui = createRecorderView({
+    getVoiceEnhance: () => microphone.isVoiceEnhance(),
+    getPanelMode: () => recorder.getMode(),
+    getCapturePhase: () => recorder.capture.phase,
+    getPlayback: () => recorder.getPlayback(),
+    syncMicControls: () => microphone.syncMicControls(),
+  })
 
-const wave = createWaveformView({
-  getAnalyser: () => microphone.getAnalyser(),
-  resumeAudio: () => microphone.resumeIfSuspended(),
-  getElapsedMs: () => recorder.capture.elapsedMs(),
-  getCapturePhase: () => recorder.capture.phase,
-  getPanelMode: () => recorder.getMode(),
-  getPlayback: () => recorder.getPlayback(),
-})
+  const wave = createWaveformView({
+    getAnalyser: () => microphone.getAnalyser(),
+    resumeAudio: () => microphone.resumeIfSuspended(),
+    getElapsedMs: () => recorder.capture.elapsedMs(),
+    getCapturePhase: () => recorder.capture.phase,
+    getPanelMode: () => recorder.getMode(),
+    getPlayback: () => recorder.getPlayback(),
+  })
 
-const takes = createTakeList({
-  getPanelMode: () => recorder.getMode(),
-  getPlayback: () => recorder.getPlayback(),
-  isRecordingActive: () => recorder.recordingActive(),
-  closeRecorderPanel: () => recorder.closeRecorderPanel(),
-  stopRecordingAndSave: (options) => recorder.stopRecordingAndSave(options),
-  openPlayback: (take) => recorder.openPlayback(take),
-  togglePlayback: () => recorder.togglePlayback(),
-  showRecMessage: (message) => ui.showRecMessage(message),
-})
+  const takes = createTakeList({
+    getPanelMode: () => recorder.getMode(),
+    getPlayback: () => recorder.getPlayback(),
+    isRecordingActive: () => recorder.recordingActive(),
+    closeRecorderPanel: () => recorder.closeRecorderPanel(),
+    stopRecordingAndSave: (options) => recorder.stopRecordingAndSave(options),
+    openPlayback: (take) => recorder.openPlayback(take),
+    togglePlayback: () => recorder.togglePlayback(),
+    showRecMessage: (message) => ui.showRecMessage(message),
+    deps,
+  })
 
-recorder = createRecorderController({ microphone, ui, wave, takes })
+  recorder = createRecorderController({ microphone, ui, wave, takes, deps })
 
-export function syncRecorderToRun() {
-  recorder.syncRecorderToRun()
-}
+  function refreshAudioInputs() {
+    return microphone.refreshAudioInputs()
+  }
 
-export function showRecMessage(message) {
-  ui.showRecMessage(message)
-}
-
-export function syncRecUi() {
-  ui.syncRecUi()
-}
-
-export function onThemeChange() {
-  wave.onThemeChange()
-}
-
-export function renderMicSelects() {
-  microphone.renderMicSelects()
-}
-
-export async function refreshAudioInputs() {
-  return microphone.refreshAudioInputs()
-}
-
-export function onMicChange(event) {
-  microphone.onMicChange(event)
-}
-
-export function onVoiceEnhanceChange(event) {
-  microphone.onVoiceEnhanceChange(event)
-}
-
-export function resetRulerTrack() {
-  wave.resetRulerTrack()
-}
-
-export function paintRecording() {
-  wave.paintRecording()
-}
-
-export function bindWavePointer() {
-  wave.bindWavePointer()
-}
-
-export function paintPlayback(forcedTime) {
-  wave.paintPlayback(forcedTime)
-}
-
-export function closeRecorderPanel() {
-  recorder.closeRecorderPanel()
-}
-
-export function restoreRecorderPanel() {
-  recorder.restoreRecorderPanel()
-}
-
-export function togglePlayback() {
-  recorder.togglePlayback()
-}
-
-export async function renderTakes() {
-  return takes.renderTakes()
-}
-
-export function stopRecordingAndSave(options) {
-  return recorder.stopRecordingAndSave(options)
-}
-
-export function startRecording() {
-  return recorder.startRecording()
-}
-
-export function finishRecording(options) {
-  return recorder.finishRecording(options)
-}
-
-export function toggleRecording() {
-  return recorder.toggleRecording()
-}
-
-export function pauseRecordingFromPanel() {
-  recorder.pauseRecordingFromPanel()
-}
-
-export function resumeRecordingFromPanel() {
-  recorder.resumeRecordingFromPanel()
-}
-
-export function onRecWithRunChange(event) {
-  recorder.onRecWithRunChange(event)
-}
-
-export function onTakesContextMenu(event) {
-  takes.onTakesContextMenu(event)
-}
-
-export function onTakesMenuKey(event) {
-  takes.onTakesMenuKey(event)
-}
-
-export function onTakesClick(event) {
-  takes.onTakesClick(event)
-}
-
-export function voiceEnhanceControl(id) {
-  return ui.voiceEnhanceControl(id)
-}
-
-export function isRecWithRun() {
-  return recorder.isRecWithRun()
-}
-
-export function recordingActive() {
-  return recorder.recordingActive()
-}
-
-export function recorderPaused() {
-  return recorder.recorderPaused()
-}
-
-export function recorderMode() {
-  return recorder.getMode()
-}
-
-export function recorderPanelHtml() {
-  return ui.recorderPanelHtml()
+  return {
+    syncRecorderToRun() {
+      recorder.syncRecorderToRun()
+    },
+    showRecMessage(message) {
+      ui.showRecMessage(message)
+    },
+    syncRecUi() {
+      ui.syncRecUi()
+    },
+    onThemeChange() {
+      wave.onThemeChange()
+    },
+    renderMicSelects() {
+      microphone.renderMicSelects()
+    },
+    refreshAudioInputs,
+    onMicChange(event) {
+      microphone.onMicChange(event)
+    },
+    onVoiceEnhanceChange(event) {
+      microphone.onVoiceEnhanceChange(event)
+    },
+    resetRulerTrack() {
+      wave.resetRulerTrack()
+    },
+    paintRecording() {
+      wave.paintRecording()
+    },
+    bindWavePointer() {
+      wave.bindWavePointer()
+    },
+    paintPlayback(forcedTime) {
+      wave.paintPlayback(forcedTime)
+    },
+    closeRecorderPanel() {
+      recorder.closeRecorderPanel()
+    },
+    restoreRecorderPanel() {
+      recorder.restoreRecorderPanel()
+    },
+    togglePlayback() {
+      recorder.togglePlayback()
+    },
+    renderTakes() {
+      return takes.renderTakes()
+    },
+    stopRecordingAndSave(options) {
+      return recorder.stopRecordingAndSave(options)
+    },
+    startRecording() {
+      return recorder.startRecording()
+    },
+    finishRecording(options) {
+      return recorder.finishRecording(options)
+    },
+    toggleRecording() {
+      return recorder.toggleRecording()
+    },
+    pauseRecordingFromPanel() {
+      recorder.pauseRecordingFromPanel()
+    },
+    resumeRecordingFromPanel() {
+      recorder.resumeRecordingFromPanel()
+    },
+    onRecWithRunChange(event) {
+      recorder.onRecWithRunChange(event)
+    },
+    onTakesContextMenu(event) {
+      takes.onTakesContextMenu(event)
+    },
+    onTakesMenuKey(event) {
+      takes.onTakesMenuKey(event)
+    },
+    onTakesClick(event) {
+      takes.onTakesClick(event)
+    },
+    voiceEnhanceControl(id) {
+      return ui.voiceEnhanceControl(id)
+    },
+    isRecWithRun() {
+      return recorder.isRecWithRun()
+    },
+    recordingActive() {
+      return recorder.recordingActive()
+    },
+    recorderPaused() {
+      return recorder.recorderPaused()
+    },
+    recorderMode() {
+      return recorder.getMode()
+    },
+    recorderPanelHtml() {
+      return ui.recorderPanelHtml()
+    },
+    warmStore() {
+      void warmRecordingStore()
+    },
+    watchAudioInputs() {
+      void refreshAudioInputs()
+      navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+        void refreshAudioInputs()
+      })
+    },
+  }
 }

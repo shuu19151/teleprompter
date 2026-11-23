@@ -2,8 +2,9 @@
  * Essay filenames are case-sensitive: a capital "E", then anything, then ".txt".
  * `E01-short-title.txt` matches. `e01-short-title.txt` and `E01-short-title.TXT` do not.
  *
- * The Vite build glob `../../essays/E*.txt` and the dev-server `/api/essays`
- * filter both use this test, so a file is either in both or in neither.
+ * The Vite build glob in `bundled-essays.js` (`../../../essays/E*.txt`) and
+ * the dev-server `/api/essays` filter both use this test, so a file is either
+ * in both or in neither.
  * (`import.meta.glob` needs a static pattern, so the glob stays a literal
  * and this function is the shared rule applied to every candidate.)
  */
