@@ -13,7 +13,7 @@ export function recMessageMarkup(className = 'rec-message') {
   return `<p class="${className}" data-rec-message role="alert" hidden><span class="rec-message-text" data-rec-message-text></span><button class="btn rec-message-dismiss" type="button" data-rec-dismiss aria-label="Dismiss">✕</button></p>`
 }
 
-export function createRecorderView({ getVoiceEnhance, getPanelMode, getCapturePhase, getPlayback, syncMicControls }) {
+export function createRecorderView({ getPanelMode, getCapturePhase, getPlayback, syncMicControls }) {
   let current = ''
 
   function paintRecMessage() {
@@ -95,10 +95,6 @@ export function createRecorderView({ getVoiceEnhance, getPanelMode, getCapturePh
     if (getPanelMode() === 'recording') syncPanelChrome()
   }
 
-  function voiceEnhanceControl(id) {
-    return `<label class="voice-enhance"><input class="voice-enhance-input" id="${id}" type="checkbox" ${getVoiceEnhance() ? 'checked' : ''} />Voice enhance</label>`
-  }
-
   function recorderPanelHtml() {
     return `
     <div class="recorder-panel" id="recorder-panel" data-mode="closed" aria-hidden="true" inert>
@@ -116,7 +112,6 @@ export function createRecorderView({ getVoiceEnhance, getPanelMode, getCapturePh
           <div class="recorder-bar">
             <div class="recorder-mic">
               <select class="mic-select" id="recorder-mic" aria-label="Microphone"></select>
-              ${voiceEnhanceControl('voice-enhance-panel')}
             </div>
             <p class="recorder-clock" id="recorder-clock">00:00.00</p>
             <div class="recorder-actions">
@@ -142,9 +137,11 @@ export function createRecorderView({ getVoiceEnhance, getPanelMode, getCapturePh
     noteDeviceReturned() {
       applyRecMessageEvent('device-returned')
     },
+    noteMicReady() {
+      applyRecMessageEvent('mic-ready')
+    },
     syncRecUi,
     syncPanelChrome,
-    voiceEnhanceControl,
     recorderPanelHtml,
   }
 }

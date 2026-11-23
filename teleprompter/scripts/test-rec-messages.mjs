@@ -181,6 +181,34 @@ test('a started recording clears the message, and a saved take clears only a sav
   }
 })
 
+test('an open microphone clears a failed open and leaves other notes', () => {
+  assert.equal(recMessageAfter(MIC_DENIED_MESSAGE, 'mic-ready'), '')
+  assert.equal(recMessageAfter(NO_MIC_MESSAGE, 'mic-ready'), '')
+  assert.equal(recMessageAfter(MIC_UNOPENABLE_MESSAGE, 'mic-ready'), '')
+  assert.equal(recMessageAfter(START_RECORDING_MESSAGE, 'mic-ready'), '')
+  assert.equal(recMessageAfter(SAVE_TAKE_MESSAGE, 'mic-ready'), SAVE_TAKE_MESSAGE)
+  assert.equal(recMessageAfter(MIC_FAILED_MESSAGE, 'mic-ready'), MIC_FAILED_MESSAGE)
+  assert.equal(recMessageAfter(DEVICE_LOST_MESSAGE, 'mic-ready'), DEVICE_LOST_MESSAGE)
+
+  const messages = [messageElement()]
+  const dom = installDocument(messages)
+  try {
+    const view = viewWith()
+    view.showRecMessage(MIC_DENIED_MESSAGE)
+    view.noteMicReady()
+    assert.equal(messages[0].hidden, true)
+    assert.equal(messages[0].text.textContent, '')
+    view.showRecMessage(SAVE_TAKE_MESSAGE)
+    view.noteMicReady()
+    assert.equal(messages[0].text.textContent, SAVE_TAKE_MESSAGE)
+    const html = view.recorderPanelHtml()
+    assert.equal(html.includes('Voice enhance'), false)
+    assert.equal(html.includes('voice-enhance'), false)
+  } finally {
+    dom.restore()
+  }
+})
+
 test('a returning microphone clears a device-lost or no-mic message only', () => {
   const messages = [messageElement(), messageElement()]
   const dom = installDocument(messages)

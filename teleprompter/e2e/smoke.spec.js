@@ -115,6 +115,61 @@ test('theme and font size persist after reload', async ({ page }) => {
   await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--script-size').trim())).toBe('44px')
 })
 
+test('a recorded take does not start with a long block of digital zeros', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText('Voice enhance')).toHaveCount(0)
+  await expect(page.locator('#takes-list')).toContainText('No takes yet')
+
+  await page.getByRole('button', { name: 'Start recording' }).click()
+  await expect(page.locator('#rec')).toHaveAttribute('aria-pressed', 'true')
+  await expect.poll(async () => (await page.locator('#recorder-clock').innerText()).trim()).not.toBe('00:00.00')
+  await page.waitForTimeout(700)
+  await page.locator('#recorder-panel').getByRole('button', { name: 'Stop recording' }).click()
+  await expect(page.locator('#takes-list .take-row')).toHaveCount(1)
+
+  await page.getByRole('button', { name: 'Start recording' }).click()
+  await expect(page.locator('#rec')).toHaveAttribute('aria-pressed', 'true')
+  await page.waitForTimeout(400)
+  await page.locator('#recorder-panel').getByRole('button', { name: 'Stop recording' }).click()
+  await expect(page.locator('#takes-list .take-row')).toHaveCount(2)
+
+  const leading = await page.evaluate(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('teleprompter')
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+    const takes = await new Promise((resolve, reject) => {
+      const tx = db.transaction('takes', 'readonly')
+      const request = tx.objectStore('takes').getAll()
+      request.onsuccess = () => resolve(request.result || [])
+      request.onerror = () => reject(request.error)
+    })
+    if (!takes.length) throw new Error('take has no audio')
+    const ctx = new AudioContext()
+    try {
+      const measured = []
+      for (const take of takes) {
+        if (!take?.blob?.arrayBuffer) throw new Error('take has no audio')
+        const audio = await ctx.decodeAudioData(await take.blob.arrayBuffer())
+        const data = audio.getChannelData(0)
+        let i = 0
+        const limit = Math.min(data.length, audio.sampleRate)
+        while (i < limit && data[i] === 0) i += 1
+        measured.push({ leadingMs: (i / audio.sampleRate) * 1000, samples: data.length })
+      }
+      return measured
+    } finally {
+      await ctx.close()
+    }
+  })
+  expect(leading).toHaveLength(2)
+  for (const take of leading) {
+    expect(take.samples).toBeGreaterThan(0)
+    expect(take.leadingMs, `leading digital zeros were ${take.leadingMs.toFixed(1)} ms`).toBeLessThan(50)
+  }
+})
+
 test('a short recording creates a take', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('#takes-list')).toContainText('No takes yet')

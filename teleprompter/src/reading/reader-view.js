@@ -125,8 +125,6 @@ export function createReaderView({
     document.querySelector('#rec-with-run')?.addEventListener('change', recording.onRecWithRunChange)
     document.querySelector('#mic-idle')?.addEventListener('change', recording.onMicChange)
     document.querySelector('#recorder-mic')?.addEventListener('change', recording.onMicChange)
-    document.querySelector('#voice-enhance')?.addEventListener('change', recording.onVoiceEnhanceChange)
-    document.querySelector('#voice-enhance-panel')?.addEventListener('change', recording.onVoiceEnhanceChange)
     recording.renderMicSelects()
     document.querySelector('#recorder-stop')?.addEventListener('click', () => {
       void recording.finishRecording()
@@ -174,6 +172,7 @@ export function createReaderView({
       const message = stageEmptyMessage(folderState())
       sheet.innerHTML = `<p class="empty">${message}</p>`
       void recording.renderTakes()
+      recording.noteReaderOpen(false)
       return
     }
     const running = isRunning()
@@ -212,7 +211,6 @@ export function createReaderView({
       <div class="mic-row" id="mic-row">
         ${MIC_ICON}
         <select class="mic-select" id="mic-idle" aria-label="Microphone"></select>
-        ${recording.voiceEnhanceControl('voice-enhance')}
       </div>
       <div class="stage-frame" id="stage-frame">
       ${recording.recorderPanelHtml()}
@@ -252,6 +250,7 @@ export function createReaderView({
     restoreIfNeeded()
     applyOffset()
     if (isRunning()) startLoop()
+    recording.noteReaderOpen(true)
   }
 
   return {

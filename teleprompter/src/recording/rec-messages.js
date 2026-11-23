@@ -34,6 +34,14 @@ const SAVE_MESSAGES = new Set([QUOTA_TAKE_MESSAGE, SAVE_TAKE_MESSAGE, DISK_TAKE_
 /** Unplug / no-device notes. A later device list that contains a microphone clears these. */
 const DEVICE_RETURN_MESSAGES = new Set([DEVICE_LOST_MESSAGE, NO_MIC_MESSAGE])
 
+/** The mic graph is open again. These are the notes from a failed open. */
+const MIC_READY_MESSAGES = new Set([
+  MIC_DENIED_MESSAGE,
+  NO_MIC_MESSAGE,
+  MIC_UNOPENABLE_MESSAGE,
+  START_RECORDING_MESSAGE,
+])
+
 export function recorderMessageChannel(message) {
   if (INLINE_MESSAGES.has(message)) return 'inline'
   if (TOAST_MESSAGES.has(message)) return 'toast'
@@ -52,12 +60,14 @@ export function describeMediaError(error) {
 
 /**
  * `recording-started` clears any inline note. `take-saved` clears a save note.
- * `device-returned` clears a device-lost or no-microphone note. `dismiss` hides it.
+ * `device-returned` clears a device-lost or no-microphone note.
+ * `mic-ready` clears a failed open once the microphone is flowing. `dismiss` hides it.
  */
 export function recMessageAfter(current, event) {
   const text = current || ''
   if (event === 'dismiss' || event === 'recording-started') return ''
   if (event === 'take-saved' && SAVE_MESSAGES.has(text)) return ''
   if (event === 'device-returned' && DEVICE_RETURN_MESSAGES.has(text)) return ''
+  if (event === 'mic-ready' && MIC_READY_MESSAGES.has(text)) return ''
   return text
 }

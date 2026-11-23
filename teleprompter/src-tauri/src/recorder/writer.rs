@@ -262,18 +262,58 @@ fn checkpoint_if_due(wav: &mut WavFile, last_second: &mut u64) -> Result<(), Rec
   Ok(())
 }
 
-enum OutputStage {
+/// Keep a sample unless it is an exact zero at the very start of the take.
+/// Later zeros, including a zero that follows speech, are kept.
+fn accept_leading(drop_leading: &mut bool, sample: f32) -> bool {
+  if !*drop_leading {
+    return true;
+  }
+  if sample == 0.0 {
+    return false;
+  }
+  *drop_leading = false;
+  true
+}
+
+struct OutputStage {
+  /// Exact digital zeros before the first real sample. The device can deliver
+  /// these for most of a second after the stream opens.
+  drop_leading: bool,
+  kind: OutputKind,
+}
+
+enum OutputKind {
   Direct,
   Resample(StreamResampler),
 }
 
 impl OutputStage {
   fn new(capture_rate: u32) -> Result<Self, RecorderError> {
-    if capture_rate == OUTPUT_SAMPLE_RATE || capture_rate == 0 {
-      Ok(Self::Direct)
+    let kind = if capture_rate == OUTPUT_SAMPLE_RATE || capture_rate == 0 {
+      OutputKind::Direct
     } else {
-      Ok(Self::Resample(StreamResampler::new(capture_rate)?))
+      OutputKind::Resample(StreamResampler::new(capture_rate)?)
+    };
+    Ok(Self {
+      drop_leading: true,
+      kind,
+    })
+  }
+
+  /// Index of the first sample that should be written. Leading exact zeros
+  /// stay out of the WAV and out of the resampler.
+  fn leading_skip(&mut self, samples: &[f32]) -> usize {
+    if !self.drop_leading {
+      return 0;
     }
+    let mut start = 0;
+    while start < samples.len() && samples[start] == 0.0 {
+      start += 1;
+    }
+    if start < samples.len() {
+      self.drop_leading = false;
+    }
+    start
   }
 
   fn push(
@@ -282,22 +322,26 @@ impl OutputStage {
     wav: &mut WavFile,
     levels: &mut LevelWindow,
   ) -> Result<(), RecorderError> {
-    match self {
-      Self::Direct => {
-        for sample in samples {
-          wav.write_f32(*sample)?;
+    let start = self.leading_skip(samples);
+    if start >= samples.len() {
+      return Ok(());
+    }
+    let audible = &samples[start..];
+    match &mut self.kind {
+      OutputKind::Direct => {
+        for sample in audible {
+          write_sample(wav, levels, *sample)?;
         }
-        levels.push_slice(samples);
         Ok(())
       }
-      Self::Resample(stage) => stage.push(samples, wav, levels),
+      OutputKind::Resample(stage) => stage.push(audible, wav, levels),
     }
   }
 
   fn finish(&mut self, wav: &mut WavFile, levels: &mut LevelWindow) -> Result<(), RecorderError> {
-    match self {
-      Self::Direct => Ok(()),
-      Self::Resample(stage) => stage.finish(wav, levels),
+    match &mut self.kind {
+      OutputKind::Direct => Ok(()),
+      OutputKind::Resample(stage) => stage.finish(wav, levels),
     }
   }
 }
@@ -314,6 +358,7 @@ struct StreamResampler {
   input_frames: u64,
   input_rate: u32,
   trim_left: usize,
+  drop_leading: bool,
   in_scratch: Vec<f32>,
   out_scratch: Vec<f32>,
 }
@@ -337,6 +382,7 @@ impl StreamResampler {
       input_frames: 0,
       input_rate: capture_rate,
       trim_left,
+      drop_leading: true,
       in_scratch: vec![0.0; in_len],
       out_scratch: vec![0.0; out_len],
     })
@@ -442,6 +488,9 @@ impl StreamResampler {
     for sample in &self.out_scratch[start..frames] {
       if cap.is_some_and(|limit| wav.frames() >= limit) {
         break;
+      }
+      if !accept_leading(&mut self.drop_leading, *sample) {
+        continue;
       }
       write_sample(wav, levels, *sample)?;
     }
@@ -573,7 +622,15 @@ mod tests {
   #[test]
   fn same_rate_keeps_every_frame() {
     let frames = 480usize;
-    let input = sine(48_000, 440.0, frames);
+    // A phase offset so the first sample is not the exact zero sin(0) produces.
+    // Leading exact zeros are dropped on purpose; this fixture has none.
+    let input: Vec<f32> = (0..frames)
+      .map(|index| {
+        let step = std::f32::consts::TAU * 440.0 / 48_000.0;
+        (step * index as f32 + 0.4).sin() * 0.5
+      })
+      .collect();
+    assert!(input[0].abs() > 1.0e-3);
     let path = temp_wav("direct");
     let (mut producer, consumer) = RingBuffer::new(frames);
     for sample in &input {
@@ -601,6 +658,95 @@ mod tests {
     assert_eq!(done.dropped_samples, 3);
     assert_eq!(done.bytes, 44 + frames as u64 * 2);
     let _ = std::fs::remove_file(&path);
+  }
+
+  #[test]
+  fn leading_exact_zeros_are_dropped_and_later_zeros_stay() {
+    let mut input = vec![0.0f32; 100];
+    input.push(0.5);
+    input.push(0.0);
+    input.push(-0.25);
+    input.extend(std::iter::repeat(0.0).take(10));
+    let path = temp_wav("leading-zeros");
+    let (mut producer, consumer) = RingBuffer::new(input.len() + 8);
+    for sample in &input {
+      producer.push(*sample).unwrap();
+    }
+    drop(producer);
+    let dropped = std::sync::Arc::new(AtomicU64::new(0));
+    let written = std::sync::Arc::new(AtomicU64::new(0));
+    let (emit, fault) = test_emit();
+    let (device_id, loss) = loss_args();
+    let handle = spawn_writer(
+      consumer,
+      dropped,
+      path.clone(),
+      48_000,
+      written,
+      emit,
+      fault,
+      device_id,
+      loss,
+    )
+    .unwrap();
+    let done = handle.finish().unwrap();
+    let kept = 13u64;
+    assert_eq!(done.frames, kept);
+    assert_eq!(done.bytes, 44 + kept * 2);
+    let mut reader = hound::WavReader::open(&path).unwrap();
+    let samples: Vec<f32> = reader
+      .samples::<i16>()
+      .map(|sample| sample.unwrap() as f32 / i16::MAX as f32)
+      .collect();
+    assert_eq!(samples.len(), kept as usize);
+    assert!(samples[0] > 0.4, "first written sample {}", samples[0]);
+    assert!(samples[1].abs() < 1.0e-4, "a zero after speech was dropped");
+    assert!(samples[2] < -0.2, "third sample {}", samples[2]);
+    assert!(samples[3..].iter().all(|sample| sample.abs() < 1.0e-4));
+    let _ = std::fs::remove_file(&path);
+  }
+
+  #[test]
+  fn an_all_zero_take_writes_no_frames() {
+    let input = vec![0.0f32; 64];
+    let path = temp_wav("all-zeros");
+    let (mut producer, consumer) = RingBuffer::new(input.len());
+    for sample in &input {
+      producer.push(*sample).unwrap();
+    }
+    drop(producer);
+    let (emit, fault) = test_emit();
+    let (device_id, loss) = loss_args();
+    let handle = spawn_writer(
+      consumer,
+      std::sync::Arc::new(AtomicU64::new(0)),
+      path.clone(),
+      48_000,
+      std::sync::Arc::new(AtomicU64::new(0)),
+      emit,
+      fault,
+      device_id,
+      loss,
+    )
+    .unwrap();
+    let done = handle.finish().unwrap();
+    assert_eq!(done.frames, 0);
+    assert!(done.bytes >= 44);
+    let reader = hound::WavReader::open(&path).unwrap();
+    assert_eq!(reader.duration(), 0);
+    let _ = std::fs::remove_file(&path);
+  }
+
+  #[test]
+  fn accept_leading_drops_only_the_opening_zeros() {
+    let mut dropping = true;
+    assert!(!accept_leading(&mut dropping, 0.0));
+    assert!(!accept_leading(&mut dropping, -0.0));
+    assert!(dropping);
+    assert!(accept_leading(&mut dropping, 0.25));
+    assert!(!dropping);
+    assert!(accept_leading(&mut dropping, 0.0));
+    assert!(accept_leading(&mut dropping, -0.5));
   }
 
   #[test]
