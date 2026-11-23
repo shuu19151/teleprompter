@@ -8,6 +8,34 @@ import { micControlState } from './recorder-math.js'
 const MIC_KEY = 'teleprompter:micId'
 const VOICE_KEY = 'teleprompter:voiceEnhance'
 
+export const DEVICE_LOST_MESSAGE = 'The microphone was disconnected. Recording stopped.'
+
+/** Native devices, default first, in the shape the existing menu already renders. */
+export function nativeMicOptions(devices) {
+  const rows = Array.isArray(devices) ? devices : []
+  const ordered = [
+    ...rows.filter((device) => device && device.isDefault),
+    ...rows.filter((device) => device && !device.isDefault),
+  ]
+  const seen = new Set()
+  const listed = []
+  for (const device of ordered) {
+    const deviceId = typeof device?.id === 'string' ? device.id : ''
+    if (!deviceId || seen.has(deviceId)) continue
+    seen.add(deviceId)
+    const label = String(device.name || '').trim() || 'Microphone'
+    listed.push({ deviceId, label })
+  }
+  return listed
+}
+
+export function applyDeviceLost({ active, finish, showNotice, showRecMessage }) {
+  showNotice?.(DEVICE_LOST_MESSAGE)
+  showRecMessage?.(DEVICE_LOST_MESSAGE)
+  if (active) return finish?.({ openAfter: false })
+  return undefined
+}
+
 export function isMissingMicError(error) {
   const name = error?.name || ''
   return name === 'OverconstrainedError' || name === 'NotFoundError' || name === 'DevicesNotFoundError'
@@ -54,7 +82,7 @@ function loadJSON(key) {
   }
 }
 
-export function createMicrophoneController({ getCapture, getPanelMode }) {
+export function createMicrophoneController({ getCapture, getPanelMode, nativeDevices = null, onDeviceLost } = {}) {
   let audioCtx = null
   let analyser = null
   let waveSource = null
@@ -63,6 +91,7 @@ export function createMicrophoneController({ getCapture, getPanelMode }) {
   let voiceEnhance = loadVoiceEnhance()
   let audioInputs = []
   let micListToken = 0
+  let nativeWatching = false
 
   function loadMicId() {
     try {
@@ -186,7 +215,42 @@ export function createMicrophoneController({ getCapture, getPanelMode }) {
     syncMicControls()
   }
 
+  async function refreshNativeInputs() {
+    const token = ++micListToken
+    let devices = []
+    try {
+      devices = (await nativeDevices.list()) || []
+    } catch {
+      devices = []
+    }
+    if (token !== micListToken) return
+    // A browser device id saved by the web path is left as it is. The menu
+    // shows the default until the reader picks a native microphone.
+    audioInputs = nativeMicOptions(devices)
+    renderMicSelects()
+  }
+
+  async function watchNativeDevices() {
+    if (!nativeDevices || nativeWatching) return
+    nativeWatching = true
+    try {
+      await nativeDevices.listen('recorder://devices-changed', () => {
+        void refreshNativeInputs()
+      })
+      await nativeDevices.listen('recorder://device-lost', (event) => {
+        onDeviceLost?.(event?.payload)
+      })
+    } catch {
+      nativeWatching = false
+    }
+    await refreshNativeInputs()
+  }
+
   async function refreshAudioInputs() {
+    if (nativeDevices) {
+      await refreshNativeInputs()
+      return
+    }
     const token = ++micListToken
     let devices = []
     try {
@@ -232,12 +296,12 @@ export function createMicrophoneController({ getCapture, getPanelMode }) {
     const deviceId = chosenMicId()
     const enhance = voiceEnhance
     try {
-      return await capture.start(micAudioConstraints(deviceId), { voiceEnhance: enhance })
+      return await capture.start(micAudioConstraints(deviceId), { voiceEnhance: enhance, deviceId })
     } catch (error) {
       if (deviceId && isMissingMicError(error)) {
         saveMicId('')
         renderMicSelects()
-        return capture.start(micAudioConstraints(''), { voiceEnhance: enhance })
+        return capture.start(micAudioConstraints(''), { voiceEnhance: enhance, deviceId: '' })
       }
       throw error
     }
@@ -257,6 +321,7 @@ export function createMicrophoneController({ getCapture, getPanelMode }) {
     syncMicControls,
     renderMicSelects,
     refreshAudioInputs,
+    watchNativeDevices,
     onMicChange,
     onVoiceEnhanceChange,
     openCapture,

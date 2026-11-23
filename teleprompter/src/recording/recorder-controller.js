@@ -2,6 +2,7 @@
  * Record, stop, and save a take. The capture in recording.js remuxes AAC
  * into one M4A file, and take-disk.js writes the Documents copy.
  */
+import { applyDeviceLost } from './microphone-controller.js'
 import { saveTakeToDocuments } from './take-disk.js'
 import { createRecorderBackend } from './recorder-backend.js'
 import {
@@ -81,6 +82,15 @@ export function createRecorderController({ microphone, ui, wave, takes, deps, re
       return (recordingMeta || takeMeta())?.textKey || ''
     },
   })
+
+  function onDeviceLost() {
+    return applyDeviceLost({
+      active: capture.isActive(),
+      finish: (options) => finishRecording(options),
+      showNotice: deps.showNotice,
+      showRecMessage: (message) => ui.showRecMessage(message),
+    })
+  }
 
   function onCaptureError() {
     ui.showRecMessage('Recording stopped because the microphone failed.')
@@ -397,6 +407,7 @@ export function createRecorderController({ microphone, ui, wave, takes, deps, re
       return playback
     },
     syncRecorderToRun,
+    onDeviceLost,
     closeRecorderPanel,
     restoreRecorderPanel,
     stopRecordingAndSave,

@@ -33,6 +33,11 @@ mock.module('@tauri-apps/api/core', {
         return Promise.resolve({ state: 'idle', durationMs: 0, sessionId: null })
       }
       if (command === 'recorder_cancel') return Promise.resolve(null)
+      if (command === 'recorder_list_devices') {
+        return Promise.resolve([
+          { id: 'wasapi:{laptop}', name: 'Laptop mic', isDefault: true, channels: 2, sampleRates: [48000] },
+        ])
+      }
       return Promise.reject(`unexpected command ${command}`)
     },
   },
@@ -57,7 +62,7 @@ mock.module('@tauri-apps/api/event', {
   },
 })
 
-const { createNativeRecorder } = await import('../src/recording/native-recorder.js')
+const { createNativeRecorder, listDevices } = await import('../src/recording/native-recorder.js')
 
 const EVENT_NAMES = ['recorder://meter', 'recorder://peaks', 'recorder://state', 'recorder://error']
 
@@ -135,6 +140,24 @@ test('stop and cancel unsubscribe even when the command rejects', async () => {
   assert.equal(await recorder.cancel(), null)
   assert.deepEqual(unsubscribed, EVENT_NAMES)
   assert.equal(listeners.get('recorder://meter')?.length || 0, 0)
+})
+
+test('start sends the selected device and channel, and list reads the host', async () => {
+  reset()
+  const recorder = createNativeRecorder()
+  await recorder.start('E01', { deviceId: 'wasapi:{usb}', channel: 1 })
+  assert.deepEqual(calls[0], {
+    command: 'recorder_start',
+    args: { textKey: 'E01', deviceId: 'wasapi:{usb}', channel: 1 },
+  })
+  calls.length = 0
+  await recorder.start('E01', { deviceId: '', channel: 0 })
+  assert.deepEqual(calls[0], { command: 'recorder_start', args: { textKey: 'E01', channel: 0 } })
+  calls.length = 0
+  assert.deepEqual(await listDevices(), [
+    { id: 'wasapi:{laptop}', name: 'Laptop mic', isDefault: true, channels: 2, sampleRates: [48000] },
+  ])
+  assert.equal(calls[0].command, 'recorder_list_devices')
 })
 
 test('a rejected start keeps the typed error string and unsubscribes', async () => {

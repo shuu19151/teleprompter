@@ -2,6 +2,8 @@
  * Recorder composition root. main.js creates this once and passes the
  * reader, library, and shell callbacks it needs.
  */
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { warmRecordingStore } from './recording.js'
 import { createMicrophoneController } from './microphone-controller.js'
 import { createRecorderController } from './recorder-controller.js'
@@ -15,6 +17,14 @@ export function createRecorder(deps) {
   const microphone = createMicrophoneController({
     getCapture: () => recorder.capture,
     getPanelMode: () => recorder.getMode(),
+    nativeDevices:
+      deps.recorderKind === 'native'
+        ? {
+            list: () => invoke('recorder_list_devices'),
+            listen: (name, handler) => listen(name, handler),
+          }
+        : null,
+    onDeviceLost: (payload) => recorder.onDeviceLost(payload),
   })
 
   const ui = createRecorderView({
@@ -158,6 +168,10 @@ export function createRecorder(deps) {
       void warmRecordingStore()
     },
     watchAudioInputs() {
+      if (deps.recorderKind === 'native') {
+        void microphone.watchNativeDevices()
+        return
+      }
       void refreshAudioInputs()
       navigator.mediaDevices?.addEventListener?.('devicechange', () => {
         void refreshAudioInputs()
