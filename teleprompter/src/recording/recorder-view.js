@@ -1,6 +1,7 @@
 /**
  * Recorder panel markup and the live control chrome.
  */
+import { recMessageAfter } from './rec-messages.js'
 import { panelChromeState, recControlState } from './recorder-math.js'
 
 const STOP_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="1.5" fill="currentColor"/></svg>`
@@ -8,14 +9,46 @@ const PAUSE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden=
 const PLAY_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5.2v13.6l11-6.8z"/></svg>`
 const CLOSE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>`
 
+export function recMessageMarkup(className = 'rec-message') {
+  return `<p class="${className}" data-rec-message role="alert" hidden><span class="rec-message-text" data-rec-message-text></span><button class="btn rec-message-dismiss" type="button" data-rec-dismiss aria-label="Dismiss">✕</button></p>`
+}
+
 export function createRecorderView({ getVoiceEnhance, getPanelMode, getCapturePhase, getPlayback, syncMicControls }) {
-  function showRecMessage(message) {
-    const text = message || ''
+  let current = ''
+
+  function paintRecMessage() {
+    const text = current || ''
     for (const el of document.querySelectorAll('[data-rec-message]')) {
-      el.textContent = text
+      const slot = el.querySelector?.('[data-rec-message-text]')
+      if (slot) slot.textContent = text
       el.hidden = !text
     }
   }
+
+  function showRecMessage(message) {
+    current = message || ''
+    paintRecMessage()
+  }
+
+  function applyRecMessageEvent(event) {
+    const next = recMessageAfter(current, event)
+    if (next === current) return
+    showRecMessage(next)
+  }
+
+  function onRecMessageClick(event) {
+    const target = event?.target
+    const button =
+      typeof target?.closest === 'function'
+        ? target.closest('[data-rec-dismiss]')
+        : typeof target?.parentElement?.closest === 'function'
+          ? target.parentElement.closest('[data-rec-dismiss]')
+          : null
+    if (!button) return
+    applyRecMessageEvent('dismiss')
+  }
+
+  document.addEventListener?.('click', onRecMessageClick)
 
   function syncPanelChrome() {
     const panel = document.querySelector('#recorder-panel')
@@ -100,6 +133,15 @@ export function createRecorderView({ getVoiceEnhance, getPanelMode, getCapturePh
 
   return {
     showRecMessage,
+    noteRecordingStarted() {
+      applyRecMessageEvent('recording-started')
+    },
+    noteTakeSaved() {
+      applyRecMessageEvent('take-saved')
+    },
+    noteDeviceReturned() {
+      applyRecMessageEvent('device-returned')
+    },
     syncRecUi,
     syncPanelChrome,
     voiceEnhanceControl,

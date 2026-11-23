@@ -5,17 +5,17 @@
 import { applyDeviceLost } from './microphone-controller.js'
 import { saveTakeToDocuments } from './take-disk.js'
 import { createRecorderBackend } from './recorder-backend.js'
+import { addTake, isQuotaError as isIdbQuotaError } from './recording.js'
 import {
-  addTake,
+  DISK_TAKE_MESSAGE,
+  MIC_FAILED_MESSAGE,
+  QUOTA_TAKE_MESSAGE,
+  SAVE_TAKE_MESSAGE,
   describeMediaError,
-  isQuotaError as isIdbQuotaError,
-} from './recording.js'
+} from './rec-messages.js'
 import { WAVE_STEP_MS, storedTake, takeMeta as buildTakeMeta, takeTextKey } from './recorder-math.js'
 
 const REC_WITH_RUN_KEY = 'teleprompter:recWithRun'
-const QUOTA_TAKE_MESSAGE = 'Could not save this take because browser storage is full.'
-const SAVE_TAKE_MESSAGE = 'Could not save this take.'
-const DISK_TAKE_MESSAGE = 'Could not save the take to Documents.'
 
 function readStorage(key) {
   try {
@@ -87,13 +87,12 @@ export function createRecorderController({ microphone, ui, wave, takes, deps, re
     return applyDeviceLost({
       active: capture.isActive(),
       finish: (options) => finishRecording(options),
-      showNotice: deps.showNotice,
       showRecMessage: (message) => ui.showRecMessage(message),
     })
   }
 
   function onCaptureError() {
-    ui.showRecMessage('Recording stopped because the microphone failed.')
+    ui.showRecMessage(MIC_FAILED_MESSAGE)
     void stopRecordingAndSave()
   }
 
@@ -195,6 +194,7 @@ export function createRecorderController({ microphone, ui, wave, takes, deps, re
           else leaveRecordingPanel()
         } else leaveRecordingPanel()
         if (diskError) ui.showRecMessage(DISK_TAKE_MESSAGE)
+        else ui.noteTakeSaved()
         return saved
       })
       .catch((error) => {
@@ -243,7 +243,7 @@ export function createRecorderController({ microphone, ui, wave, takes, deps, re
     wave.stopPlayLoop()
     microphone.closeAudioGraph()
     if (capture.usesWebCapture !== false) microphone.ensureAudioContext()
-    ui.showRecMessage('')
+    ui.noteRecordingStarted()
     wave.resetPeaks()
     wave.resetRulerTrack()
     manualHold = false

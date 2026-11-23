@@ -1,3 +1,4 @@
+import { recMessageMarkup } from '../recording/recorder-view.js'
 import { ENTER_ICON } from '../shell/fullscreen.js'
 import { wheelDistance } from './reader-controller.js'
 import { FONT_MAX, FONT_MIN } from './reader-layout.js'
@@ -206,7 +207,7 @@ export function createReaderView({
             <span id="font-size-value">${fontSize}</span>
           </label>
         </div>
-        <p class="rec-message" data-rec-message role="alert" hidden></p>
+        ${recMessageMarkup()}
       </div>
       <div class="mic-row" id="mic-row">
         ${MIC_ICON}
@@ -216,7 +217,7 @@ export function createReaderView({
       <div class="stage-frame" id="stage-frame">
       ${recording.recorderPanelHtml()}
       <div class="stage" id="text-view">
-        <p class="rec-message rec-stage-message" data-rec-message role="alert" hidden></p>
+        ${recMessageMarkup('rec-message rec-stage-message')}
         <button class="btn rec rec-stage" id="rec-stage" type="button" aria-pressed="false" aria-label="Start recording">
           <span class="rec-dot" aria-hidden="true"></span>
           <span>Rec</span>

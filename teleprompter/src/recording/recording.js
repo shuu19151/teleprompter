@@ -1,5 +1,7 @@
 import { remuxMp4Blob } from './mp4remux.js'
 
+export { describeMediaError } from './rec-messages.js'
+
 const DB_NAME = 'teleprompter'
 const DB_STORE = 'takes'
 const DB_VERSION = 1
@@ -125,18 +127,6 @@ export function isQuotaError(error) {
   if (!error) return false
   if (error.name === 'QuotaExceededError' || error.name === 'NS_ERROR_DOM_QUOTA_REACHED') return true
   return error.code === 22 || error.code === 1014
-}
-
-export function describeMediaError(error) {
-  const name = error?.name || ''
-  if (name === 'NotAllowedError' || name === 'PermissionDeniedError') return 'Microphone access was denied.'
-  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return 'No microphone was found.'
-  if (name === 'NotReadableError' || name === 'TrackStartError' || name === 'AbortError') {
-    return 'The microphone could not be opened.'
-  }
-  if (name === 'SecurityError') return 'Recording needs https or localhost.'
-  if (name === 'NotSupportedError') return 'This browser cannot record audio.'
-  return 'Could not start recording.'
 }
 
 export function pickMimeType() {
