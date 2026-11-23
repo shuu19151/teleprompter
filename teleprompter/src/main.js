@@ -67,7 +67,7 @@ import {
   updatedImportRecord,
   validateImportBody,
   writeImports,
-} from './library/text-import.js'
+} from './library/import-store.js'
 import { warmRecordingStore } from './recording/recording.js'
 import { bridge } from './ui-bridge.js'
 import {
