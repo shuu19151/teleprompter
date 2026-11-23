@@ -11,7 +11,7 @@ import { createImportDialog } from './library/import-dialog.js'
 import { parseEssay } from './library/import-store.js'
 import { createLibrary } from './library/library-controller.js'
 import { createSidebar, stageEmptyMessage } from './library/sidebar-view.js'
-import { SPEED_KEY, createReaderController } from './reading/reader-controller.js'
+import { createReaderController } from './reading/reader-controller.js'
 import { createReaderLayout } from './reading/reader-layout.js'
 import { createReaderProgress } from './reading/reader-progress.js'
 import { createReaderView } from './reading/reader-view.js'
@@ -21,50 +21,10 @@ import { createConfirmDialog } from './shell/confirm-dialog.js'
 import { createFullscreen } from './shell/fullscreen.js'
 import { showNotice } from './shell/notifications.js'
 import { bindThemeToggle, readThemeStorage, theme } from './shell/theme.js'
-
-const LEGACY_KEYS = {
-  [SPEED_KEY]: 'office-essay:speed',
-}
+import { loadJSON, readStorage, writeStorage } from './shared/storage.js'
 
 // Case-sensitive E*.txt, matching isEssayFile and /api/essays.
 const files = import.meta.glob('../../essays/E*.txt', { query: '?raw', import: 'default', eager: true })
-
-function readStorage(key) {
-  try {
-    const value = localStorage.getItem(key)
-    if (value !== null) return value
-    const legacy = LEGACY_KEYS[key]
-    if (!legacy) return null
-    const old = localStorage.getItem(legacy)
-    if (old === null) return null
-    try {
-      localStorage.setItem(key, old)
-    } catch {
-      /* still use the legacy value */
-    }
-    return old
-  } catch {
-    return null
-  }
-}
-
-function writeStorage(key, value) {
-  try {
-    localStorage.setItem(key, value)
-  } catch {
-    /* ignore quota or private mode */
-  }
-}
-
-function loadJSON(key) {
-  try {
-    const raw = readStorage(key)
-    if (raw === null) return null
-    return JSON.parse(raw)
-  } catch {
-    return null
-  }
-}
 
 function essaysFromGlob() {
   return Object.entries(files)
