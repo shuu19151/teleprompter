@@ -21,6 +21,7 @@ import { createConfirmDialog } from './shell/confirm-dialog.js'
 import { createFullscreen } from './shell/fullscreen.js'
 import { showNotice } from './shell/notifications.js'
 import { bindThemeToggle, readThemeStorage, theme } from './shell/theme.js'
+import { escapeAttr, escapeHtml } from './shared/html.js'
 import { loadJSON, readStorage, writeStorage } from './shared/storage.js'
 
 // Case-sensitive E*.txt, matching isEssayFile and /api/essays.
@@ -34,18 +35,6 @@ function essaysFromGlob() {
 }
 
 const bundledEssays = essaysFromGlob()
-
-function escapeHtml(value) {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-}
-
-function escapeAttr(value) {
-  return escapeHtml(value)
-}
 
 const confirmDialog = createConfirmDialog()
 
