@@ -19,6 +19,21 @@ import {
 } from './content-selection.js'
 import { isEssayFile } from './essay-files.js'
 import {
+  READING_RATIO,
+  anchorOffset,
+  clampOffset,
+  findActiveIndex as activeLineIndex,
+  formatRemaining as formatSecondsLeft,
+  fractionAtOffset as fractionOnLine,
+  offsetForFraction as offsetOnLine,
+  pixelsPerSecond as scrollPixelsPerSecond,
+  progressRatio,
+  readingFromTop as guideFromTop,
+  remainingSeconds,
+  restoreOffset,
+  scriptFocusY as focusYFor,
+} from './reader-math.js'
+import {
   clearSavedFolder,
   deleteEssayFile,
   folderPermission,
@@ -95,7 +110,6 @@ const IMPORTS_KEY = 'teleprompter:imports'
 const FONT_MIN = 24
 const FONT_MAX = 56
 const FONT_DEFAULT = 32
-const READING_RATIO = 1 / 3
 const SAVE_DELAY = 300
 const TYPE_IMPORT_MESSAGE = 'Choose a .txt or .md file.'
 const READ_IMPORT_MESSAGE = 'Could not read that file.'
@@ -214,24 +228,24 @@ let restoredAnchor = null
 let saveTimer = 0
 
 function pixelsPerSecond() {
-  return state.speed * 2.5
+  return scrollPixelsPerSecond(state.speed)
 }
 
 function readingFromTop() {
-  return offsetCache.height * READING_RATIO
+  return guideFromTop(offsetCache.height)
 }
 
 /** Script-space Y of the guide, one third down the stage. */
 function scriptFocusY() {
-  return state.offset + readingFromTop() - offsetCache.focusShift
+  return focusYFor({ offset: state.offset, height: offsetCache.height, focusShift: offsetCache.focusShift })
 }
 
 function offsetForFraction(top, height, fraction) {
-  return top + fraction * height - readingFromTop() + offsetCache.focusShift
+  return offsetOnLine(top, height, fraction, { readingFromTop: readingFromTop(), focusShift: offsetCache.focusShift })
 }
 
 function fractionAtOffset(top, height) {
-  return (scriptFocusY() - top) / (height || 1)
+  return fractionOnLine(top, height, scriptFocusY())
 }
 
 function maxOffset() {
@@ -289,20 +303,7 @@ function measure() {
 }
 
 function findActiveIndex(focusY) {
-  const last = lineMetrics.length - 1
-  if (last <= 0) return 0
-  if (focusY <= lineMetrics[0].center) return 0
-  if (focusY >= lineMetrics[last].center) return last
-  let low = 0
-  let high = last
-  while (low + 1 < high) {
-    const mid = (low + high) >> 1
-    if (lineMetrics[mid].center <= focusY) low = mid
-    else high = mid
-  }
-  const lowDistance = focusY - lineMetrics[low].center
-  const highDistance = lineMetrics[high].center - focusY
-  return lowDistance <= highDistance ? low : high
+  return activeLineIndex(lineMetrics, focusY)
 }
 
 function paintFocus(next) {
@@ -326,12 +327,17 @@ function updateFocus() {
 }
 
 function reanchor() {
-  if (!anchor || !lineMetrics.length) return
-  if (anchor.width === offsetCache.width && anchor.height === offsetCache.height) return
-  const metric = lineMetrics[anchor.index]
-  if (!metric) return
-  const target = offsetForFraction(metric.top, metric.height, anchor.fraction)
-  state.offset = Math.min(offsetCache.max, Math.max(0, target))
+  const next = anchorOffset({
+    anchor,
+    metrics: lineMetrics,
+    width: offsetCache.width,
+    height: offsetCache.height,
+    max: offsetCache.max,
+    readingFromTop: readingFromTop(),
+    focusShift: offsetCache.focusShift,
+  })
+  if (next === null) return
+  state.offset = next
 }
 
 function captureAnchor() {
@@ -349,10 +355,7 @@ function captureAnchor() {
 }
 
 function formatRemaining(seconds) {
-  const total = Math.max(0, Math.round(Number.isFinite(seconds) ? seconds : 0))
-  const minutes = Math.floor(total / 60)
-  const secs = total % 60
-  return `${minutes}:${String(secs).padStart(2, '0')} left`
+  return formatSecondsLeft(seconds)
 }
 
 function updateProgress() {
@@ -360,14 +363,13 @@ function updateProgress() {
   const label = document.querySelector('#progress-time')
   if (!bar && !label) return
   const max = offsetCache.max
-  const ratio = max > 0 ? Math.min(1, Math.max(0, state.offset / max)) : 0
+  const ratio = progressRatio(state.offset, max)
   if (bar) {
     bar.style.transform = `scaleX(${ratio})`
     bar.setAttribute('aria-valuenow', String(Math.round(ratio * 100)))
   }
   if (label) {
-    const rate = pixelsPerSecond()
-    const seconds = rate > 0 ? Math.max(0, max - state.offset) / rate : 0
+    const seconds = remainingSeconds(state.offset, max, pixelsPerSecond())
     label.textContent = formatRemaining(seconds)
   }
 }
@@ -497,7 +499,7 @@ function wheelDistance(event) {
 function scrollBy(distance) {
   if (!distance) return
   const limit = maxOffset()
-  const destination = Math.min(limit, Math.max(0, state.offset + wheelLeft + distance))
+  const destination = clampOffset(state.offset + wheelLeft + distance, limit)
   wheelLeft = destination - state.offset
   if (!raf) startLoop()
 }
@@ -612,21 +614,17 @@ function restoreEssay() {
 function restorePosition() {
   const saved = loadJSON(POSITION_KEY)
   if (!positionApplies(saved, itemKey(current()))) return
-  if (
-    Number.isInteger(saved.index) &&
-    saved.index >= 0 &&
-    saved.index < lineMetrics.length &&
-    Number.isFinite(saved.fraction)
-  ) {
-    const metric = lineMetrics[saved.index]
-    restoredAnchor = { index: saved.index, fraction: saved.fraction }
-    anchor = { index: saved.index, fraction: saved.fraction, width: -1, height: -1 }
-    state.offset = Math.min(offsetCache.max, Math.max(0, offsetForFraction(metric.top, metric.height, saved.fraction)))
-    return
-  }
-  if (Number.isFinite(saved.offset)) {
-    state.offset = Math.min(offsetCache.max, Math.max(0, saved.offset))
-  }
+  const next = restoreOffset({
+    saved,
+    lineMetrics,
+    max: offsetCache.max,
+    readingFromTop: readingFromTop(),
+    focusShift: offsetCache.focusShift,
+  })
+  if (!next) return
+  if (next.restoredAnchor) restoredAnchor = next.restoredAnchor
+  if (next.anchor) anchor = next.anchor
+  state.offset = next.offset
 }
 
 let noticeTimer = 0
