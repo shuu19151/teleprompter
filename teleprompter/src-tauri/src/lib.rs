@@ -19,6 +19,8 @@ pub fn run() {
       recorder::recorder_status,
       recorder::recorder_cancel,
       recorder::recorder_list_devices,
+      recorder::recorder_recover,
+      recorder::recorder_recover_apply,
       takes::takes_list,
       takes::takes_delete,
       takes::takes_read,

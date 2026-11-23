@@ -32,3 +32,13 @@ commands.allow = ["recorder_cancel"]
 identifier = "allow-recorder-list-devices"
 description = "Enables the recorder_list_devices command."
 commands.allow = ["recorder_list_devices"]
+
+[[permission]]
+identifier = "allow-recorder-recover"
+description = "Enables the recorder_recover command."
+commands.allow = ["recorder_recover"]
+
+[[permission]]
+identifier = "allow-recorder-recover-apply"
+description = "Enables the recorder_recover_apply command."
+commands.allow = ["recorder_recover_apply"]

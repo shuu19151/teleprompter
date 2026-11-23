@@ -10,6 +10,10 @@
 //! pause; the partial window is flushed into the segment being closed. Resume
 //! opens a new file and does not trim leading zeros. That trim is only for the
 //! silence a device can emit when the stream first opens.
+//!
+//! Every `rotate_after` output frames the open file is finalized and the next
+//! sample opens `seg-NNN.wav`. That work stays on this thread. The capture
+//! callback only pushes into the ring.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -24,6 +28,7 @@ use rtrb::{Consumer, PopError};
 
 use super::events::{notify_device_lost, ErrorEvent, RecorderEmit};
 use super::levels::{LevelTick, LevelWindow};
+use super::session::{self, SessionStore};
 use super::wav::WavFile;
 use super::{RecorderError, OUTPUT_SAMPLE_RATE};
 
@@ -122,6 +127,9 @@ pub fn spawn_writer(
   fault: Arc<AtomicBool>,
   device_id: String,
   loss_notified: Arc<AtomicBool>,
+  // Output frames per segment. `0` or `u64::MAX` disables rotation.
+  rotate_after: u64,
+  session: Option<Arc<SessionStore>>,
 ) -> Result<WriterHandle, RecorderError> {
   let stop = Arc::new(AtomicBool::new(false));
   let stop_flag = Arc::clone(&stop);
@@ -142,6 +150,8 @@ pub fn spawn_writer(
         device_id,
         loss_notified,
         command_rx,
+        rotate_after,
+        session,
       )
     })
     .map_err(|error| RecorderError::Write(error.to_string()))?;
@@ -165,6 +175,8 @@ fn write_loop(
   device_id: String,
   loss_notified: Arc<AtomicBool>,
   commands: Receiver<WriterCommand>,
+  rotate_after: u64,
+  session: Option<Arc<SessionStore>>,
 ) -> Result<WriterDone, RecorderError> {
   match write_audio(
     consumer,
@@ -178,6 +190,8 @@ fn write_loop(
     &device_id,
     &loss_notified,
     commands,
+    rotate_after,
+    session,
   ) {
     Ok(done) => Ok(done),
     Err(error) => {
@@ -199,8 +213,10 @@ fn write_audio(
   device_id: &str,
   loss_notified: &AtomicBool,
   commands: Receiver<WriterCommand>,
+  rotate_after: u64,
+  store: Option<Arc<SessionStore>>,
 ) -> Result<WriterDone, RecorderError> {
-  let mut session = SessionWriter::open(&path, capture_rate)?;
+  let mut session = SessionWriter::open(&path, capture_rate, rotate_after, store)?;
   let mut batch = [0.0f32; 256];
   let mut fault_sent = false;
   loop {
@@ -362,6 +378,7 @@ struct SessionDone {
 }
 
 struct SessionWriter {
+  directory: PathBuf,
   wav: Option<WavFile>,
   stage: OutputStage,
   levels: LevelWindow,
@@ -369,13 +386,31 @@ struct SessionWriter {
   paused_samples: u64,
   closed_frames: u64,
   closed_bytes: u64,
-  last_second: u64,
+  /// Second boundary already checkpointed in the open segment.
+  segment_second: u64,
+  /// Second boundary already written into session.json.
+  heartbeat_second: u64,
   capture_rate: u32,
+  /// Frames in the open segment before it is finalized. Zero disables rotation.
+  rotate_after: u64,
+  /// Next `seg-NNN` index when this take has no session file.
+  fallback_index: u32,
+  store: Option<Arc<SessionStore>>,
 }
 
 impl SessionWriter {
-  fn open(path: &Path, capture_rate: u32) -> Result<Self, RecorderError> {
+  fn open(
+    path: &Path,
+    capture_rate: u32,
+    rotate_after: u64,
+    store: Option<Arc<SessionStore>>,
+  ) -> Result<Self, RecorderError> {
+    let directory = path
+      .parent()
+      .map(Path::to_path_buf)
+      .unwrap_or_else(|| PathBuf::from("."));
     Ok(Self {
+      directory,
       wav: Some(WavFile::create(path)?),
       stage: OutputStage::new(capture_rate)?,
       levels: LevelWindow::new(OUTPUT_SAMPLE_RATE),
@@ -383,8 +418,12 @@ impl SessionWriter {
       paused_samples: 0,
       closed_frames: 0,
       closed_bytes: 0,
-      last_second: 0,
+      segment_second: 0,
+      heartbeat_second: 0,
       capture_rate,
+      rotate_after: if rotate_after == u64::MAX { 0 } else { rotate_after },
+      fallback_index: 1,
+      store,
     })
   }
 
@@ -412,19 +451,111 @@ impl SessionWriter {
       self.paused_samples += samples.len() as u64;
       return Ok(());
     }
-    let Self {
-      wav,
-      stage,
-      levels,
-      last_second,
-      ..
-    } = self;
-    let Some(wav) = wav.as_mut() else {
-      return Err(RecorderError::Write("the segment is not open".into()));
-    };
-    stage.push(samples, wav, levels)?;
-    checkpoint_if_due(wav, last_second)?;
+    let mut stage = std::mem::replace(&mut self.stage, OutputStage::dormant());
+    let result = stage.push(samples, &mut |sample| self.accept(sample));
+    self.stage = stage;
+    result
+  }
+
+  /// Write one output frame. A full segment is finalized here, and the next
+  /// call opens the following file. Nothing in this path runs on the capture
+  /// callback.
+  fn accept(&mut self, sample: f32) -> Result<(), RecorderError> {
+    if self.paused {
+      self.paused_samples += 1;
+      return Ok(());
+    }
+    self.ensure_open()?;
+    {
+      let wav = self
+        .wav
+        .as_mut()
+        .ok_or_else(|| RecorderError::Write("the segment is not open".into()))?;
+      wav.write_f32(sample)?;
+    }
+    self.levels.push_sample(sample);
+    let frames = self.wav.as_ref().map(WavFile::frames).unwrap_or(0);
+    if self.rotate_after > 0 && frames >= self.rotate_after {
+      self.seal_open_wav()?;
+    } else {
+      self.maybe_checkpoint()?;
+    }
     Ok(())
+  }
+
+  fn ensure_open(&mut self) -> Result<(), RecorderError> {
+    if self.wav.is_some() {
+      return Ok(());
+    }
+    let name = self.next_segment_name()?;
+    let path = self.directory.join(&name);
+    self.wav = Some(WavFile::create(&path)?);
+    self.segment_second = 0;
+    let closed = self.closed_frames;
+    if let Some(store) = &self.store {
+      store.update(|record| {
+        if !record.segments.iter().any(|existing| existing == &name) {
+          record.segments.push(name);
+        }
+        record.last_written_ms = session::duration_ms(closed);
+      })?;
+    } else {
+      self.fallback_index = self.fallback_index.saturating_add(1);
+    }
+    Ok(())
+  }
+
+  fn next_segment_name(&mut self) -> Result<String, RecorderError> {
+    if let Some(store) = &self.store {
+      let record = store.snapshot()?;
+      return Ok(session::segment_name(record.segments.len() as u32));
+    }
+    let name = session::segment_name(self.fallback_index);
+    Ok(name)
+  }
+
+  /// Finalize the open file without flushing the resampler or the level window.
+  /// Those keep going into the next segment.
+  fn seal_open_wav(&mut self) -> Result<(), RecorderError> {
+    let Some(wav) = self.wav.take() else {
+      return Ok(());
+    };
+    let done = wav.finalize()?;
+    self.closed_frames += done.frames;
+    self.closed_bytes += done.bytes;
+    self.segment_second = 0;
+    self.persist_length()
+  }
+
+  fn maybe_checkpoint(&mut self) -> Result<(), RecorderError> {
+    let second = self
+      .wav
+      .as_ref()
+      .map(WavFile::frames)
+      .unwrap_or(0)
+      / u64::from(OUTPUT_SAMPLE_RATE);
+    if second == self.segment_second {
+      return Ok(());
+    }
+    if let Some(wav) = self.wav.as_mut() {
+      wav.checkpoint()?;
+    }
+    self.segment_second = second;
+    let total = self.recorded_frames() / u64::from(OUTPUT_SAMPLE_RATE);
+    if total != self.heartbeat_second {
+      self.heartbeat_second = total;
+      self.persist_length()?;
+    }
+    Ok(())
+  }
+
+  fn persist_length(&mut self) -> Result<(), RecorderError> {
+    let Some(store) = &self.store else {
+      return Ok(());
+    };
+    let ms = session::duration_ms(self.recorded_frames());
+    self.heartbeat_second = self.recorded_frames() / u64::from(OUTPUT_SAMPLE_RATE);
+    store.update(|record| record.last_written_ms = ms)
   }
 
   fn pause(&mut self) -> Result<Option<LevelTick>, RecorderError> {
@@ -444,7 +575,7 @@ impl SessionWriter {
     let stage = OutputStage::continuing(self.capture_rate)?;
     self.wav = Some(wav);
     self.stage = stage;
-    self.last_second = 0;
+    self.segment_second = 0;
     self.paused = false;
     Ok(())
   }
@@ -465,22 +596,12 @@ impl SessionWriter {
   }
 
   fn close_open_segment(&mut self) -> Result<Option<LevelTick>, RecorderError> {
-    let Some(mut wav) = self.wav.take() else {
-      return Ok(None);
-    };
-    if let Err(error) = self.stage.finish(&mut wav, &mut self.levels) {
-      self.wav = Some(wav);
-      return Err(error);
-    }
-    let tail = self.levels.finish();
-    match wav.finalize() {
-      Ok(done) => {
-        self.closed_frames += done.frames;
-        self.closed_bytes += done.bytes;
-        Ok(tail)
-      }
-      Err(error) => Err(error),
-    }
+    let mut stage = std::mem::replace(&mut self.stage, OutputStage::dormant());
+    let flushed = stage.finish(&mut |sample| self.accept(sample));
+    self.stage = stage;
+    flushed?;
+    self.seal_open_wav()?;
+    Ok(self.levels.finish())
   }
 }
 
@@ -514,15 +635,6 @@ fn publish_fault(
   notify_device_lost(emit, loss_notified, device_id);
 }
 
-fn checkpoint_if_due(wav: &mut WavFile, last_second: &mut u64) -> Result<(), RecorderError> {
-  let second = wav.frames() / u64::from(OUTPUT_SAMPLE_RATE);
-  if second != *last_second {
-    wav.checkpoint()?;
-    *last_second = second;
-  }
-  Ok(())
-}
-
 /// Keep a sample unless it is an exact zero at the very start of the take.
 /// Later zeros, including a zero that follows speech, are kept.
 fn accept_leading(drop_leading: &mut bool, sample: f32) -> bool {
@@ -549,6 +661,13 @@ enum OutputKind {
 }
 
 impl OutputStage {
+  fn dormant() -> Self {
+    Self {
+      drop_leading: false,
+      kind: OutputKind::Direct,
+    }
+  }
+
   fn new(capture_rate: u32) -> Result<Self, RecorderError> {
     let kind = if capture_rate == OUTPUT_SAMPLE_RATE || capture_rate == 0 {
       OutputKind::Direct
@@ -591,8 +710,7 @@ impl OutputStage {
   fn push(
     &mut self,
     samples: &[f32],
-    wav: &mut WavFile,
-    levels: &mut LevelWindow,
+    write: &mut dyn FnMut(f32) -> Result<(), RecorderError>,
   ) -> Result<(), RecorderError> {
     let start = self.leading_skip(samples);
     if start >= samples.len() {
@@ -602,32 +720,32 @@ impl OutputStage {
     match &mut self.kind {
       OutputKind::Direct => {
         for sample in audible {
-          write_sample(wav, levels, *sample)?;
+          write(*sample)?;
         }
         Ok(())
       }
-      OutputKind::Resample(stage) => stage.push(audible, wav, levels),
+      OutputKind::Resample(stage) => stage.push(audible, write),
     }
   }
 
-  fn finish(&mut self, wav: &mut WavFile, levels: &mut LevelWindow) -> Result<(), RecorderError> {
+  fn finish(
+    &mut self,
+    write: &mut dyn FnMut(f32) -> Result<(), RecorderError>,
+  ) -> Result<(), RecorderError> {
     match &mut self.kind {
       OutputKind::Direct => Ok(()),
-      OutputKind::Resample(stage) => stage.finish(wav, levels),
+      OutputKind::Resample(stage) => stage.finish(write),
     }
   }
-}
-
-fn write_sample(wav: &mut WavFile, levels: &mut LevelWindow, sample: f32) -> Result<(), RecorderError> {
-  wav.write_f32(sample)?;
-  levels.push_sample(sample);
-  Ok(())
 }
 
 struct StreamResampler {
   resampler: Fft<f32>,
   pending: Vec<f32>,
   input_frames: u64,
+  /// Samples actually written. Rotation must not reset this: the finish cap
+  /// is the whole resampled take, not the current file.
+  written_frames: u64,
   input_rate: u32,
   trim_left: usize,
   drop_leading: bool,
@@ -652,6 +770,7 @@ impl StreamResampler {
       resampler,
       pending: Vec::with_capacity(in_len * 2),
       input_frames: 0,
+      written_frames: 0,
       input_rate: capture_rate,
       trim_left,
       drop_leading: true,
@@ -663,34 +782,32 @@ impl StreamResampler {
   fn push(
     &mut self,
     samples: &[f32],
-    wav: &mut WavFile,
-    levels: &mut LevelWindow,
+    write: &mut dyn FnMut(f32) -> Result<(), RecorderError>,
   ) -> Result<(), RecorderError> {
     self.pending.extend_from_slice(samples);
     self.input_frames += samples.len() as u64;
     while self.pending.len() >= self.resampler.input_frames_next() {
       let count = self.resampler.input_frames_next();
-      self.process(count, None, wav, levels, None)?;
+      self.process(count, None, write, None)?;
     }
     Ok(())
   }
 
   fn finish(
     &mut self,
-    wav: &mut WavFile,
-    levels: &mut LevelWindow,
+    write: &mut dyn FnMut(f32) -> Result<(), RecorderError>,
   ) -> Result<(), RecorderError> {
     let expected = expected_output_frames(self.input_frames, self.input_rate);
     if !self.pending.is_empty() {
       let count = self.pending.len();
-      self.process(count, Some(count), wav, levels, Some(expected))?;
+      self.process(count, Some(count), write, Some(expected))?;
     }
     let mut pumps = 0;
-    while wav.frames() < expected && pumps < PUMP_LIMIT {
-      let before = wav.frames();
-      self.process(0, Some(0), wav, levels, Some(expected))?;
+    while self.written_frames < expected && pumps < PUMP_LIMIT {
+      let before = self.written_frames;
+      self.process(0, Some(0), write, Some(expected))?;
       pumps += 1;
-      if wav.frames() == before && self.trim_left == 0 {
+      if self.written_frames == before && self.trim_left == 0 {
         break;
       }
     }
@@ -701,8 +818,7 @@ impl StreamResampler {
     &mut self,
     count: usize,
     partial: Option<usize>,
-    wav: &mut WavFile,
-    levels: &mut LevelWindow,
+    write: &mut dyn FnMut(f32) -> Result<(), RecorderError>,
     cap: Option<u64>,
   ) -> Result<(), RecorderError> {
     if count > self.in_scratch.len() {
@@ -737,7 +853,7 @@ impl StreamResampler {
         "the resampler wrote past its output buffer".into(),
       ));
     }
-    self.emit(produced, wav, levels, cap)?;
+    self.emit(produced, write, cap)?;
     if count > 0 {
       self.pending.drain(..count);
     }
@@ -747,8 +863,7 @@ impl StreamResampler {
   fn emit(
     &mut self,
     frames: usize,
-    wav: &mut WavFile,
-    levels: &mut LevelWindow,
+    write: &mut dyn FnMut(f32) -> Result<(), RecorderError>,
     cap: Option<u64>,
   ) -> Result<(), RecorderError> {
     let mut start = 0;
@@ -758,13 +873,14 @@ impl StreamResampler {
       start = skip;
     }
     for sample in &self.out_scratch[start..frames] {
-      if cap.is_some_and(|limit| wav.frames() >= limit) {
+      if cap.is_some_and(|limit| self.written_frames >= limit) {
         break;
       }
       if !accept_leading(&mut self.drop_leading, *sample) {
         continue;
       }
-      write_sample(wav, levels, *sample)?;
+      write(*sample)?;
+      self.written_frames += 1;
     }
     Ok(())
   }
@@ -867,6 +983,8 @@ mod tests {
       fault,
       device_id,
       loss,
+      u64::MAX,
+      None,
     )
     .unwrap();
     let done = handle.finish().unwrap();
@@ -923,6 +1041,8 @@ mod tests {
       fault,
       device_id,
       loss,
+      u64::MAX,
+      None,
     )
     .unwrap();
     let done = handle.finish().unwrap();
@@ -959,6 +1079,8 @@ mod tests {
       fault,
       device_id,
       loss,
+      u64::MAX,
+      None,
     )
     .unwrap();
     let done = handle.finish().unwrap();
@@ -999,6 +1121,8 @@ mod tests {
       fault,
       device_id,
       loss,
+      u64::MAX,
+      None,
     )
     .unwrap();
     let done = handle.finish().unwrap();
@@ -1039,6 +1163,8 @@ mod tests {
       fault,
       device_id,
       loss,
+      u64::MAX,
+      None,
     )
     .unwrap();
     handle.pause().unwrap();
@@ -1102,6 +1228,8 @@ mod tests {
       fault,
       device_id,
       loss,
+      u64::MAX,
+      None,
     )
     .unwrap();
     let done = handle.finish().unwrap();

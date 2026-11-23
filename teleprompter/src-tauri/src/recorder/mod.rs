@@ -12,15 +12,18 @@
 //! the boundary is flushed into the segment that just closed, then nothing is
 //! emitted until resume. `recorder_resume` opens the next segment. The first
 //! file is `seg-000.wav`. Each resume adds `seg-001.wav`, `seg-002.wav`, and
-//! so on. A 60 second rotation is a later phase, and concatenation is the one
-//! after that. Duration counts written frames only, so the pause is not part
-//! of it. A lost device finalizes the open segment, including while paused,
-//! and emits `recorder://device-lost`.
+//! so on. The writer also opens a new segment after 60 seconds of recorded
+//! audio, finalizes the file it just closed, and rewrites `session.json`.
+//! Duration counts written frames only, so the pause is not part of it. A lost
+//! device finalizes the open segment, including while paused, and emits
+//! `recorder://device-lost`.
 
 mod capture;
 mod device;
 mod events;
 mod levels;
+mod recovery;
+mod session;
 mod wav;
 mod writer;
 
@@ -41,12 +44,8 @@ use events::{notify_device_lost, DevicesChangedEvent, ErrorEvent, RecorderEmit, 
 pub const OUTPUT_SAMPLE_RATE: u32 = 48_000;
 
 const SESSIONS_DIR: &str = ".sessions";
-const SESSION_FILE: &str = "session.json";
 
-/// `seg-000.wav`, then `seg-001.wav` on each resume. The width is a minimum.
-fn segment_name(index: u32) -> String {
-  format!("seg-{index:03}.wav")
-}
+use session::{duration_ms, segment_frames, segment_name, SessionRecord, SessionStore};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecorderError {
@@ -142,6 +141,8 @@ pub struct RecorderInner {
   /// Last input list seen while idle. The watcher emits when this changes.
   devices: Vec<InputDevice>,
   devices_ready: bool,
+  /// Output frames kept in one segment. Production uses 60 seconds.
+  segment_frames: u64,
 }
 
 impl RecorderInner {
@@ -150,6 +151,7 @@ impl RecorderInner {
       active: None,
       devices: Vec::new(),
       devices_ready: false,
+      segment_frames: segment_frames(OUTPUT_SAMPLE_RATE),
     }
   }
 
@@ -168,6 +170,8 @@ impl RecorderInner {
     &mut self,
     sessions_root: &Path,
     text_key: String,
+    code: String,
+    title: String,
     device_id: Option<&str>,
     channel: Option<u16>,
     emit: Arc<dyn RecorderEmit>,
@@ -179,7 +183,7 @@ impl RecorderInner {
     let device_name = opened.device_name.clone();
     let opened_id = opened.device_id.clone();
     let capture_rate = opened.capture_rate;
-    let prepared = prepare_session(sessions_root, text_key, device_name)?;
+    let prepared = prepare_session(sessions_root, text_key, code, title, device_name)?;
     let (producer, consumer) = rtrb::RingBuffer::new(capture::ring_capacity(capture_rate));
     let dropped = Arc::new(AtomicU64::new(0));
     let written = Arc::new(AtomicU64::new(0));
@@ -195,6 +199,8 @@ impl RecorderInner {
       Arc::clone(&fault),
       opened_id.clone(),
       Arc::clone(&loss_notified),
+      self.segment_frames,
+      Some(Arc::clone(&prepared.store)),
     ) {
       Ok(writer) => writer,
       Err(error) => {
@@ -290,10 +296,7 @@ impl RecorderInner {
     self.active = Some(ActiveSession {
       id: prepared.id,
       directory: prepared.directory,
-      segments: prepared.segments,
-      text_key: prepared.text_key,
-      device_name: prepared.device_name,
-      started_at: prepared.started_at,
+      store: prepared.store,
       paused: false,
       capture,
       writer,
@@ -324,11 +327,7 @@ impl Drop for RecorderInner {
 struct ActiveSession {
   id: String,
   directory: PathBuf,
-  /// File names in the session folder, in record order.
-  segments: Vec<String>,
-  text_key: String,
-  device_name: String,
-  started_at: String,
+  store: Arc<SessionStore>,
   paused: bool,
   capture: capture::CapturePump,
   writer: writer::WriterHandle,
@@ -367,17 +366,22 @@ impl ActiveSession {
     if !self.paused {
       return Err(RecorderError::NotPaused);
     }
-    let name = segment_name(self.segments.len() as u32);
+    let name = segment_name(self.store.snapshot()?.segments.len() as u32);
     let path = self.directory.join(&name);
     self.writer.resume(path)?;
-    self.segments.push(name);
     self.paused = false;
     let event = self.state_event();
     self.emit.state(&StateNotice {
       state: event.state,
       duration_ms: event.duration_ms,
     });
-    if let Err(error) = self.persist("recording") {
+    if let Err(error) = self.store.update(|record| {
+      if !record.segments.iter().any(|existing| existing == &name) {
+        record.segments.push(name);
+      }
+      record.state = "recording".into();
+      record.last_written_ms = event.duration_ms;
+    }) {
       self.emit.error(&ErrorEvent::from_recorder(&error));
       return Err(error);
     }
@@ -386,33 +390,41 @@ impl ActiveSession {
 
   fn finish(mut self) -> Result<StopResponse, RecorderError> {
     self.capture.stop();
-    let paths = self.segment_paths();
+    let store = Arc::clone(&self.store);
+    let directory = self.directory.clone();
+    let emit = Arc::clone(&self.emit);
     let result = match self.writer.finish() {
-      Ok(done) => match write_session(
-        &self.directory,
-        &self.started_at,
-        &self.text_key,
-        &self.device_name,
-        "stopped",
-        &self.segments,
-      ) {
-        Ok(()) => Ok(StopResponse {
-          path: paths.first().cloned().unwrap_or_default(),
-          paths,
-          duration_ms: duration_ms(done.frames),
-          bytes: done.bytes,
-          dropped_samples: done.dropped_samples,
-          peaks: done.peaks,
-        }),
-        Err(error) => {
-          self.emit.error(&ErrorEvent::from_recorder(&error));
-          Err(error)
+      Ok(done) => {
+        let duration = duration_ms(done.frames);
+        match store.update(|record| {
+          record.state = "stopped".into();
+          record.last_written_ms = duration;
+        }) {
+          Ok(()) => {
+            let names = store.snapshot().map(|record| record.segments).unwrap_or_default();
+            let paths: Vec<String> = names
+              .iter()
+              .map(|name| path_string(&directory.join(name)))
+              .collect();
+            Ok(StopResponse {
+              path: paths.first().cloned().unwrap_or_default(),
+              paths,
+              duration_ms: duration,
+              bytes: done.bytes,
+              dropped_samples: done.dropped_samples,
+              peaks: done.peaks,
+            })
+          }
+          Err(error) => {
+            emit.error(&ErrorEvent::from_recorder(&error));
+            Err(error)
+          }
         }
-      },
+      }
       Err(error) => Err(error),
     };
     let duration_ms = result.as_ref().map(|stopped| stopped.duration_ms).unwrap_or(0);
-    self.emit.state(&StateNotice {
+    emit.state(&StateNotice {
       state: RecorderPhase::Idle,
       duration_ms,
     });
@@ -431,23 +443,12 @@ impl ActiveSession {
     }
   }
 
-  fn segment_paths(&self) -> Vec<String> {
-    self
-      .segments
-      .iter()
-      .map(|name| path_string(&self.directory.join(name)))
-      .collect()
-  }
-
   fn persist(&self, state: &str) -> Result<(), RecorderError> {
-    write_session(
-      &self.directory,
-      &self.started_at,
-      &self.text_key,
-      &self.device_name,
-      state,
-      &self.segments,
-    )
+    let ms = duration_ms(self.written.load(Ordering::Relaxed));
+    self.store.update(|record| {
+      record.state = state.to_string();
+      record.last_written_ms = ms;
+    })
   }
 
   fn discard(mut self) -> Result<(), RecorderError> {
@@ -474,10 +475,7 @@ struct PreparedSession {
   id: String,
   directory: PathBuf,
   wav_path: PathBuf,
-  segments: Vec<String>,
-  text_key: String,
-  device_name: String,
-  started_at: String,
+  store: Arc<SessionStore>,
 }
 
 impl PreparedSession {
@@ -489,6 +487,8 @@ impl PreparedSession {
 fn prepare_session(
   sessions_root: &Path,
   text_key: String,
+  code: String,
+  title: String,
   device_name: String,
 ) -> Result<PreparedSession, RecorderError> {
   let id = uuid::Uuid::new_v4().to_string();
@@ -498,54 +498,21 @@ fn prepare_session(
   })?;
   let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
   let segments = vec![segment_name(0)];
-  if let Err(error) = write_session(
-    &directory,
-    &started_at,
-    &text_key,
-    &device_name,
-    "recording",
-    &segments,
-  ) {
-    let _ = fs::remove_dir_all(&directory);
-    return Err(error);
-  }
+  let record = SessionRecord::new(started_at, text_key, code, title, device_name, segments.clone());
+  let store = match SessionStore::create(directory.clone(), record) {
+    Ok(store) => store,
+    Err(error) => {
+      let _ = fs::remove_dir_all(&directory);
+      return Err(error);
+    }
+  };
   let wav_path = directory.join(&segments[0]);
   Ok(PreparedSession {
     id,
     wav_path,
     directory,
-    segments,
-    text_key,
-    device_name,
-    started_at,
+    store: Arc::new(store),
   })
-}
-
-fn write_session(
-  directory: &Path,
-  started_at: &str,
-  text_key: &str,
-  device_name: &str,
-  state: &str,
-  segments: &[String],
-) -> Result<(), RecorderError> {
-  let body = serde_json::json!({
-    "startedAt": started_at,
-    "textKey": text_key,
-    "sampleRate": OUTPUT_SAMPLE_RATE,
-    "deviceName": device_name,
-    "state": state,
-    "segments": segments,
-  });
-  let bytes = serde_json::to_vec_pretty(&body)
-    .map_err(|error| RecorderError::Session(error.to_string()))?;
-  fs::write(directory.join(SESSION_FILE), bytes).map_err(|error| {
-    RecorderError::Session(format!("could not write {SESSION_FILE}: {error}"))
-  })
-}
-
-fn duration_ms(frames: u64) -> u64 {
-  frames.saturating_mul(1_000) / u64::from(OUTPUT_SAMPLE_RATE)
 }
 
 fn path_string(path: &Path) -> String {
@@ -671,12 +638,16 @@ pub fn recorder_start(
   text_key: String,
   device_id: Option<String>,
   channel: Option<u16>,
+  code: Option<String>,
+  title: Option<String>,
 ) -> Result<StartResponse, RecorderError> {
   let root = sessions_root(&app)?;
   let emit = Arc::new(AppEmit(app));
   match lock(&state)?.start_with_device(
     &root,
     text_key,
+    code.unwrap_or_default(),
+    title.unwrap_or_default(),
     device_id.as_deref(),
     channel,
     Arc::clone(&emit) as Arc<dyn RecorderEmit>,
@@ -717,6 +688,45 @@ pub fn recorder_status(state: State<'_, RecorderState>) -> Result<StateEvent, Re
 #[tauri::command(async)]
 pub fn recorder_cancel(state: State<'_, RecorderState>) -> Result<(), RecorderError> {
   lock(&state)?.cancel()
+}
+
+#[tauri::command]
+pub fn recorder_recover(
+  app: AppHandle,
+  state: State<'_, RecorderState>,
+) -> Result<Vec<recovery::RecoveredSession>, RecorderError> {
+  let active = lock(&state)?
+    .active
+    .as_ref()
+    .map(|session| session.id.clone());
+  let mut found = recovery::scan_unfinished(&sessions_root(&app)?)?;
+  if let Some(id) = active {
+    found.retain(|session| session.session_id != id);
+  }
+  Ok(found)
+}
+
+#[tauri::command(async)]
+pub fn recorder_recover_apply(
+  app: AppHandle,
+  state: State<'_, RecorderState>,
+  session_id: String,
+  action: String,
+) -> Result<(), RecorderError> {
+  let active = lock(&state)?
+    .active
+    .as_ref()
+    .map(|session| session.id.clone());
+  if active.as_deref() == Some(session_id.as_str()) {
+    return Err(RecorderError::Session(
+      "that recording is still open".into(),
+    ));
+  }
+  let root = app.path().document_dir().map_err(|error| {
+    RecorderError::Session(format!("could not find the Documents folder: {error}"))
+  })?;
+  let takes = root.join("Teleprompter");
+  recovery::apply(&takes.join(SESSIONS_DIR), &takes, &session_id, &action)
 }
 
 #[cfg(test)]
@@ -822,7 +832,7 @@ mod tests {
       .unwrap();
     let session_path = dir.path().join(&started.session_id);
     let meta: serde_json::Value =
-      serde_json::from_slice(&fs::read(session_path.join(SESSION_FILE)).unwrap()).unwrap();
+      serde_json::from_slice(&fs::read(session_path.join(session::SESSION_FILE)).unwrap()).unwrap();
     assert_eq!(meta["textKey"], "E01");
     assert_eq!(meta["sampleRate"], OUTPUT_SAMPLE_RATE);
     assert_eq!(meta["deviceName"], "Test input");
@@ -844,7 +854,7 @@ mod tests {
     assert_eq!(stopped.paths, vec![path_string(&session_path.join(segment_name(0)))]);
     assert_eq!(stopped.path, stopped.paths[0]);
     let after: serde_json::Value =
-      serde_json::from_slice(&fs::read(session_path.join(SESSION_FILE)).unwrap()).unwrap();
+      serde_json::from_slice(&fs::read(session_path.join(session::SESSION_FILE)).unwrap()).unwrap();
     assert_eq!(after["state"], "stopped");
     let reader = hound::WavReader::open(&session_path.join(segment_name(0))).unwrap();
     assert_eq!(reader.duration(), 4);
@@ -959,7 +969,7 @@ mod tests {
     );
     let session_path = wav_path.parent().unwrap();
     let meta: serde_json::Value =
-      serde_json::from_slice(&fs::read(session_path.join(SESSION_FILE)).unwrap()).unwrap();
+      serde_json::from_slice(&fs::read(session_path.join(session::SESSION_FILE)).unwrap()).unwrap();
     assert_eq!(meta["state"], "stopped");
   }
 
@@ -1096,6 +1106,55 @@ mod tests {
   }
 
   #[test]
+  fn recorded_audio_rotates_at_the_segment_boundary() {
+    const SHORT_SEGMENT_FRAMES: u64 = 8;
+    let dir = scratch_dir();
+    let mut recorder = RecorderInner::new();
+    recorder.segment_frames = SHORT_SEGMENT_FRAMES;
+    let (started, mut producer) = recorder
+      .start_fed(dir.path(), "E01", 64, Arc::new(events::NopEmit))
+      .unwrap();
+    let session_path = dir.path().join(&started.session_id);
+    let samples: Vec<f32> = (0..20)
+      .map(|index| if index % 2 == 0 { 0.4 } else { -0.3 })
+      .collect();
+    push_all(&mut producer, &samples[..SHORT_SEGMENT_FRAMES as usize]);
+    wait_written(&recorder, SHORT_SEGMENT_FRAMES);
+
+    let closed = session_path.join(segment_name(0));
+    let reader = hound::WavReader::open(&closed).unwrap();
+    assert_eq!(reader.duration(), SHORT_SEGMENT_FRAMES as u32);
+    assert_eq!(reader.spec().sample_rate, OUTPUT_SAMPLE_RATE);
+    let during = read_session(&session_path);
+    assert_eq!(during["segments"], serde_json::json!(["seg-000.wav"]));
+    assert_eq!(during["lastWrittenMs"], duration_ms(SHORT_SEGMENT_FRAMES));
+    assert_eq!(during["state"], "recording");
+    assert!(!session_path.join("session.json.tmp").exists());
+
+    push_all(&mut producer, &samples[SHORT_SEGMENT_FRAMES as usize..]);
+    drop(producer);
+    let stopped = recorder.stop().unwrap();
+    assert_eq!(stopped.paths.len(), 3);
+    assert_eq!(stopped.duration_ms, duration_ms(samples.len() as u64));
+    let lengths = [8u32, 8, 4];
+    let mut joined = Vec::new();
+    for (path, length) in stopped.paths.iter().zip(lengths) {
+      let mut reader = hound::WavReader::open(path).unwrap();
+      assert_eq!(reader.duration(), length);
+      joined.extend(reader.samples::<i16>().map(|sample| sample.unwrap()));
+    }
+    assert_eq!(joined, pcm_of(&samples));
+    let after = read_session(&session_path);
+    assert_eq!(after["state"], "stopped");
+    assert_eq!(
+      after["segments"],
+      serde_json::json!(["seg-000.wav", "seg-001.wav", "seg-002.wav"])
+    );
+    assert_eq!(after["lastWrittenMs"], duration_ms(samples.len() as u64));
+    assert!(!session_path.join("session.json.tmp").exists());
+  }
+
+  #[test]
   fn device_loss_while_paused_finalizes_the_open_segment() {
     let dir = scratch_dir();
     let emit = Arc::new(MemoryEmit::default());
@@ -1193,7 +1252,13 @@ mod tests {
       if self.active.is_some() {
         return Err(RecorderError::AlreadyRecording);
       }
-      let prepared = prepare_session(sessions_root, text_key.to_string(), "Sine generator".into())?;
+      let prepared = prepare_session(
+        sessions_root,
+        text_key.to_string(),
+        text_key.to_string(),
+        String::new(),
+        "Sine generator".into(),
+      )?;
       let (producer, consumer) = rtrb::RingBuffer::new(capture::ring_capacity(capture_rate));
       let dropped = Arc::new(AtomicU64::new(0));
       let written = Arc::new(AtomicU64::new(0));
@@ -1210,6 +1275,8 @@ mod tests {
         Arc::clone(&fault),
         device_id.clone(),
         Arc::clone(&loss_notified),
+        self.segment_frames,
+        Some(Arc::clone(&prepared.store)),
       )?;
       let capture = capture::CapturePump::from_sine(producer, capture_rate);
       self.activate(
@@ -1251,7 +1318,13 @@ mod tests {
       if self.active.is_some() {
         return Err(RecorderError::AlreadyRecording);
       }
-      let prepared = prepare_session(sessions_root, text_key.to_string(), "Test input".into())?;
+      let prepared = prepare_session(
+        sessions_root,
+        text_key.to_string(),
+        text_key.to_string(),
+        String::new(),
+        "Test input".into(),
+      )?;
       let (mut producer, consumer) = rtrb::RingBuffer::new(capacity.max(1));
       let dropped = Arc::new(AtomicU64::new(0));
       capture::push_frames(samples, 1, None, &mut producer, &dropped, capture::f32_sample);
@@ -1270,6 +1343,8 @@ mod tests {
         Arc::clone(&fault),
         device_id.clone(),
         Arc::clone(&loss_notified),
+        self.segment_frames,
+        Some(Arc::clone(&prepared.store)),
       )?;
       self.activate(
         prepared,
@@ -1293,7 +1368,13 @@ mod tests {
       if self.active.is_some() {
         return Err(RecorderError::AlreadyRecording);
       }
-      let prepared = prepare_session(sessions_root, text_key.to_string(), "Test input".into())?;
+      let prepared = prepare_session(
+        sessions_root,
+        text_key.to_string(),
+        text_key.to_string(),
+        String::new(),
+        "Test input".into(),
+      )?;
       let (producer, consumer) = rtrb::RingBuffer::new(capacity.max(1));
       let dropped = Arc::new(AtomicU64::new(0));
       let written = Arc::new(AtomicU64::new(0));
@@ -1310,6 +1391,8 @@ mod tests {
         Arc::clone(&fault),
         device_id.clone(),
         Arc::clone(&loss_notified),
+        self.segment_frames,
+        Some(Arc::clone(&prepared.store)),
       )?;
       let started = self.activate(
         prepared,
@@ -1325,6 +1408,24 @@ mod tests {
     }
   }
 
+  fn wait_written(recorder: &RecorderInner, frames: u64) {
+    let started = std::time::Instant::now();
+    loop {
+      let written = recorder
+        .active
+        .as_ref()
+        .map(|session| session.written.load(Ordering::Relaxed))
+        .unwrap_or(0);
+      if written >= frames {
+        return;
+      }
+      if started.elapsed() > std::time::Duration::from_secs(2) {
+        panic!("writer did not reach {frames} frames (saw {written})");
+      }
+      std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+  }
+
   fn push_all(producer: &mut rtrb::Producer<f32>, samples: &[f32]) {
     for sample in samples {
       producer.push(*sample).expect("the test ring holds the fixture");
@@ -1332,7 +1433,7 @@ mod tests {
   }
 
   fn read_session(directory: &Path) -> serde_json::Value {
-    serde_json::from_slice(&fs::read(directory.join(SESSION_FILE)).unwrap()).unwrap()
+    serde_json::from_slice(&fs::read(directory.join(session::SESSION_FILE)).unwrap()).unwrap()
   }
 
   fn read_pcm(path: &Path) -> Vec<i16> {

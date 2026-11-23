@@ -18,14 +18,45 @@ export function confirmDialogMarkup() {
 export function createConfirmDialog() {
   let confirmResolver = null
   let confirmReturnFocus = null
+  let pendingDismiss = false
+  let cancelChosen = false
 
-  function askConfirm({ title, message }) {
+  function paintActions(confirmLabel, cancelLabel, confirmIsDanger) {
+    const confirmButton = document.querySelector('#confirm-delete')
+    const cancelButton = document.querySelector('#confirm-cancel')
+    if (confirmButton) {
+      confirmButton.textContent = confirmLabel
+      confirmButton.classList.toggle('danger', confirmIsDanger)
+    }
+    if (cancelButton) {
+      cancelButton.textContent = cancelLabel
+      cancelButton.classList.toggle('danger', !confirmIsDanger)
+    }
+  }
+
+  function restoreActions() {
+    paintActions('Delete', 'Cancel', true)
+  }
+
+  function settle(value) {
+    const resolve = confirmResolver
+    if (!resolve) return
+    confirmResolver = null
+    restoreActions()
+    resolve(value)
+  }
+
+  function askConfirm({ title, message, confirmLabel, cancelLabel, confirmIsDanger, dismiss } = {}) {
     const dialog = document.querySelector('#confirm-dialog')
-    if (!dialog || dialog.open) return Promise.resolve(false)
+    const unresolved = dismiss === undefined ? false : dismiss
+    if (!dialog || dialog.open) return Promise.resolve(unresolved)
     const heading = dialog.querySelector('#confirm-heading')
     const copy = dialog.querySelector('#confirm-copy')
     if (heading) heading.textContent = title
     if (copy) copy.textContent = message
+    paintActions(confirmLabel || 'Delete', cancelLabel || 'Cancel', confirmIsDanger !== false)
+    pendingDismiss = unresolved
+    cancelChosen = false
     confirmReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     return new Promise((resolve) => {
       confirmResolver = resolve
@@ -39,11 +70,10 @@ export function createConfirmDialog() {
     const confirmCancel = confirmDialog.querySelector('#confirm-cancel')
     const confirmDelete = confirmDialog.querySelector('#confirm-delete')
     confirmDialog.addEventListener('close', () => {
-      const resolve = confirmResolver
-      confirmResolver = null
       const back = confirmReturnFocus
       confirmReturnFocus = null
-      resolve?.(false)
+      settle(cancelChosen ? false : pendingDismiss)
+      cancelChosen = false
       if (back?.isConnected) back.focus()
     })
     confirmDialog.addEventListener('click', (event) => {
@@ -57,7 +87,10 @@ export function createConfirmDialog() {
       if (event.key === 'Enter') {
         if (event.target === confirmDelete) return
         event.preventDefault()
-        if (event.target === confirmCancel) confirmDialog.close()
+        if (event.target === confirmCancel) {
+          cancelChosen = true
+          confirmDialog.close()
+        }
         return
       }
       if (event.key !== 'Tab') return
@@ -74,12 +107,13 @@ export function createConfirmDialog() {
         first.focus()
       }
     })
-    confirmCancel.addEventListener('click', () => confirmDialog.close())
-    confirmDelete.addEventListener('click', () => {
-      const resolve = confirmResolver
-      confirmResolver = null
+    confirmCancel.addEventListener('click', () => {
+      cancelChosen = true
       confirmDialog.close()
-      resolve?.(true)
+    })
+    confirmDelete.addEventListener('click', () => {
+      settle(true)
+      confirmDialog.close()
     })
   }
 
