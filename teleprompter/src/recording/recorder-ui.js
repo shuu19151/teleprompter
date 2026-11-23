@@ -157,6 +157,12 @@ export function syncRecUi() {
   if (panelMode === 'recording') syncPanelChrome()
 }
 
+export function onThemeChange() {
+  colorCache = { theme: '', ink: '', line: '' }
+  if (panelMode === 'recording') paintRecording()
+  else if (panelMode === 'playback') paintPlayback()
+}
+
 function themeColors() {
   const theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'
   if (colorCache.theme === theme && colorCache.ink) return colorCache
@@ -1193,5 +1199,3 @@ export function recorderPanelHtml() {
       </div>
     </div>`
 }
-
-const app = document.querySelector('#app')
