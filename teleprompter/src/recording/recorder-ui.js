@@ -2,6 +2,7 @@
  * Recorder composition root. main.js creates this once and passes the
  * reader, library, and shell callbacks it needs.
  */
+import { warmRecordingStore } from './recording.js'
 import { createMicrophoneController } from './microphone-controller.js'
 import { createRecorderController } from './recorder-controller.js'
 import { createRecorderView } from './recorder-view.js'
@@ -145,6 +146,15 @@ export function createRecorder(deps) {
     },
     recorderPanelHtml() {
       return ui.recorderPanelHtml()
+    },
+    warmStore() {
+      void warmRecordingStore()
+    },
+    watchAudioInputs() {
+      void refreshAudioInputs()
+      navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+        void refreshAudioInputs()
+      })
     },
   }
 }

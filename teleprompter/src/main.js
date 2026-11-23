@@ -1,10 +1,12 @@
+/**
+ * Composition root. Imports each domain, passes the callbacks it needs, and starts the app.
+ */
 import '@fontsource/jetbrains-mono/400.css'
 import '@fontsource/jetbrains-mono/500.css'
 import '@fontsource/jetbrains-mono/700.css'
 import '@fontsource/literata/latin-400.css'
 import '@fontsource/literata/latin-700.css'
 import './style.css'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { loadBundledEssays } from './library/bundled-essays.js'
 import { inTauri } from './library/essay-folder.js'
 import { createImportDialog } from './library/import-dialog.js'
@@ -14,12 +16,13 @@ import { createReaderController } from './reading/reader-controller.js'
 import { createReaderLayout } from './reading/reader-layout.js'
 import { createReaderProgress } from './reading/reader-progress.js'
 import { createReaderView } from './reading/reader-view.js'
-import { warmRecordingStore } from './recording/recording.js'
 import { createRecorder } from './recording/recorder-ui.js'
+import { mountApp } from './shell/app-shell.js'
 import { createConfirmDialog } from './shell/confirm-dialog.js'
 import { createFullscreen } from './shell/fullscreen.js'
+import { bindContextMenuBlock, bindPageLeave, bindWindowClose } from './shell/lifecycle.js'
 import { showNotice } from './shell/notifications.js'
-import { bindThemeToggle, readThemeStorage, theme } from './shell/theme.js'
+import { readThemeStorage } from './shell/theme.js'
 import { escapeAttr, escapeHtml } from './shared/html.js'
 import { loadJSON, readStorage, writeStorage } from './shared/storage.js'
 
@@ -185,82 +188,39 @@ const sidebar = createSidebar({
 
 readThemeStorage()
 
-function mount() {
-  const app = document.querySelector('#app')
-  app.innerHTML = `
-    <div class="window">
-      <header class="topbar">
-        <button class="menu" id="menu" type="button" aria-label="Essays" aria-controls="sidebar" aria-expanded="false">Menu</button>
-        <div class="brand">Teleprompter</div>
-        <label class="search">
-          <span class="sr">Search essays and texts</span>
-          <input id="search" type="search" placeholder="Search" value="${escapeAttr(library.query)}" />
-        </label>
-        <button class="tool" id="theme" type="button">${theme() === 'dark' ? 'Light' : 'Dark'}</button>
-      </header>
-      <div class="body">
-${sidebar.markup()}
-        <button class="backdrop" id="backdrop" type="button" aria-label="Close menu"></button>
-        <main class="sheet"></main>
-      </div>
-    </div>
-${importDialog.markup()}
-${confirmDialog.markup()}
-  `
-  sidebar.bind()
-  bindThemeToggle({ onThemeChange: recorder.onThemeChange })
-  const takesList = document.querySelector('#takes-list')
-  takesList?.addEventListener('click', recorder.onTakesClick)
-  takesList?.addEventListener('contextmenu', recorder.onTakesContextMenu)
-  takesList?.addEventListener('keydown', recorder.onTakesMenuKey)
-  confirmDialog.bind()
-  importDialog.bind()
-  sidebar.renderList()
-  view.renderSheet()
-}
-
 async function start() {
   if (inTauri()) {
-    let closing = false
-    await getCurrentWindow().onCloseRequested(async (event) => {
-      if (closing) {
-        event.preventDefault()
-        return
-      }
-      closing = true
+    await bindWindowClose(async () => {
       progress.saveProgressNow()
       await recorder.stopRecordingAndSave({ openAfter: false })
-    }).catch((error) => console.error('Could not listen for window close requests.', error))
+    })
   }
   await library.bootFolder()
   library.restoreEssay()
-  void warmRecordingStore()
+  recorder.warmStore()
   layout.syncScriptSize()
-  mount()
-  void recorder.refreshAudioInputs()
-  navigator.mediaDevices?.addEventListener?.('devicechange', () => {
-    void recorder.refreshAudioInputs()
+  mountApp({
+    query: library.query,
+    sidebar,
+    importDialog,
+    confirmDialog,
+    onThemeChange: recorder.onThemeChange,
+    onTakesClick: recorder.onTakesClick,
+    onTakesContextMenu: recorder.onTakesContextMenu,
+    onTakesMenuKey: recorder.onTakesMenuKey,
+    renderSheet: view.renderSheet,
   })
+  recorder.watchAudioInputs()
   reader.remeasureWhenFontsReady()
 }
 
 void start()
 
-function onPageLeave() {
+bindPageLeave(() => {
   progress.saveProgressNow()
   if (recorder.recordingActive()) void recorder.stopRecordingAndSave()
-}
-
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') onPageLeave()
 })
-window.addEventListener('pagehide', onPageLeave)
-window.addEventListener('beforeunload', onPageLeave)
 
 fullscreen.bindChange()
-
-document.addEventListener('contextmenu', (event) => {
-  event.preventDefault()
-})
-
+bindContextMenuBlock()
 reader.bindKeyboard()
