@@ -1,0 +1,14 @@
+[[permission]]
+identifier = "allow-takes-list"
+description = "Enables the takes_list command."
+commands.allow = ["takes_list"]
+
+[[permission]]
+identifier = "allow-takes-delete"
+description = "Enables the takes_delete command."
+commands.allow = ["takes_delete"]
+
+[[permission]]
+identifier = "allow-takes-read"
+description = "Enables the takes_read command."
+commands.allow = ["takes_read"]

@@ -20,6 +20,9 @@
     "allow-recorder-status",
     "allow-recorder-cancel",
     "allow-recorder-list-devices",
+    "allow-takes-list",
+    "allow-takes-delete",
+    "allow-takes-read",
     {
       "identifier": "fs:allow-mkdir",
       "allow": [{ "path": "$DOCUMENT/Teleprompter" }]

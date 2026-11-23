@@ -34,6 +34,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 rubato = "5.1.0"
 audioadapter-buffers = "5.2.0"
 uuid = { version = "1.29.3", features = ["v4"] }
+notify = "6.1"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39.1"

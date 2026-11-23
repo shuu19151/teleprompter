@@ -4,6 +4,7 @@ import { createMicrophoneController } from '../src/recording/microphone-controll
 import {
   DELETE_TAKE_MESSAGE,
   DEVICE_LOST_MESSAGE,
+  PLAY_TAKE_MESSAGE,
   DISK_TAKE_MESSAGE,
   MIC_DENIED_MESSAGE,
   MIC_FAILED_MESSAGE,
@@ -94,6 +95,7 @@ test('mic and save failures stay inline, and delete or reveal failures toast', (
   for (const message of INLINE) assert.equal(recorderMessageChannel(message), 'inline')
   assert.equal(recorderMessageChannel(DELETE_TAKE_MESSAGE), 'toast')
   assert.equal(recorderMessageChannel(SHOW_TAKE_MESSAGE), 'toast')
+  assert.equal(recorderMessageChannel(PLAY_TAKE_MESSAGE), 'toast')
   assert.equal(recorderMessageChannel('Recording needs https or localhost.'), null)
   assert.equal(recorderMessageChannel('This browser cannot record audio.'), null)
   assert.equal(recorderMessageChannel(''), null)

@@ -1,11 +1,12 @@
 /**
  * Record, stop, and save a take. The capture in recording.js remuxes AAC
- * into one M4A file, and take-disk.js writes the Documents copy.
+ * into one M4A file. The takes store writes that file and its sidecar.
  */
+import { inTauri } from '../library/essay-folder.js'
 import { applyDeviceLost } from './microphone-controller.js'
-import { saveTakeToDocuments } from './take-disk.js'
 import { createRecorderBackend } from './recorder-backend.js'
-import { addTake, isQuotaError as isIdbQuotaError } from './recording.js'
+import { isQuotaError as isIdbQuotaError } from './recording.js'
+import { downsamplePeaks } from './takes-catalog.js'
 import {
   DISK_TAKE_MESSAGE,
   MIC_FAILED_MESSAGE,
@@ -49,7 +50,7 @@ function loadRecWithRun() {
   return true
 }
 
-export function createRecorderController({ microphone, ui, wave, takes, deps, recorderKind = 'web' }) {
+export function createRecorderController({ microphone, ui, wave, takes, store, deps, recorderKind = 'web' }) {
   let recWithRun = loadRecWithRun()
   let recordingMeta = null
   let saveTask = null
@@ -175,15 +176,9 @@ export function createRecorderController({ microphone, ui, wave, takes, deps, re
     }
     const exported = wave.exportPeaks()
     const take = storedTake({ meta, result, createdAt: Date.now() })
-    let diskError = false
-    let diskPath
-    try {
-      diskPath = await saveTakeToDocuments(take)
-    } catch {
-      diskError = true
-    }
-    if (typeof diskPath === 'string' && diskPath) take.diskPath = diskPath
-    return addTake(take)
+    take.peaks = downsamplePeaks(exported.peaks)
+    return store
+      .save(take)
       .then(async (saved) => {
         saved.livePeaks = exported.peaks
         saved.livePeakOrigin = exported.origin
@@ -193,12 +188,12 @@ export function createRecorderController({ microphone, ui, wave, takes, deps, re
           if (openAfterSave) await openPlayback(saved)
           else leaveRecordingPanel()
         } else leaveRecordingPanel()
-        if (diskError) ui.showRecMessage(DISK_TAKE_MESSAGE)
-        else ui.noteTakeSaved()
+        ui.noteTakeSaved()
         return saved
       })
       .catch((error) => {
-        ui.showRecMessage(isIdbQuotaError(error) ? QUOTA_TAKE_MESSAGE : SAVE_TAKE_MESSAGE)
+        const quota = isIdbQuotaError(error)
+        ui.showRecMessage(quota ? QUOTA_TAKE_MESSAGE : inTauri() ? DISK_TAKE_MESSAGE : SAVE_TAKE_MESSAGE)
         leaveRecordingPanel()
         return null
       })
@@ -338,7 +333,7 @@ export function createRecorderController({ microphone, ui, wave, takes, deps, re
       take,
       url,
       audio,
-      peaks: take.livePeaks || null,
+      peaks: take.livePeaks || take.peaks || null,
       peakOrigin: take.livePeakOrigin || 0,
       peakStep: WAVE_STEP_MS / 1000,
       ratio: 0,

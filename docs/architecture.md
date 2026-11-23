@@ -4,7 +4,7 @@
 
 `window.__teleprompterTest` is not defined. Playwright starts `vite --mode test` and reads the DOM. A production build must not contain the string `__teleprompterTest`.
 
-Behavior, CSS, DOM ids and classes, and stored data are unchanged. `teleprompter:position` is still one slot for the open text, written by `src/reading/reader-progress.js`. `src-tauri` is unchanged.
+Behavior, CSS, and DOM ids and classes are unchanged. `teleprompter:position` is still one slot for the open text, written by `src/reading/reader-progress.js`. Takes are the exception: `Documents/Teleprompter` is the list. `src-tauri` scans that folder, deletes a take, reads its audio for playback, and watches the folder.
 
 ## Wiring order
 
@@ -76,11 +76,23 @@ Line counts are the file length after this phase, including comments.
 | `src/recording/recorder-view.js` | 108 | Panel markup and live chrome |
 | `src/recording/microphone-controller.js` | 264 | Microphone choice and the analyser graph |
 | `src/recording/waveform-view.js` | 422 | Waveform, ruler, and seeking |
-| `src/recording/take-list.js` | 195 | Takes for the open text |
-| `src/recording/recording.js` | 623 | Capture, IndexedDB, and the M4A remux call |
+| `src/recording/take-list.js` | 195 | Takes for the open text, refreshed from the folder |
+| `src/recording/recording.js` | 623 | Capture, the browser IndexedDB mirror, and the M4A remux call |
 | `src/recording/mp4remux.js` | 918 | AAC remux into one M4A file |
-| `src/recording/take-disk.js` | 74 | Documents copy in the Tauri shell |
+| `src/recording/take-disk.js` | 74 | Documents audio file and sidecar |
+| `src/recording/takes-catalog.js` | — | Sidecar shape, migration, and the in-memory catalog |
+| `src/recording/takes-store.js` | — | Tauri commands or the in-memory catalog |
 | `src/recording/recorder-math.js` | 173 | Take list and waveform calculations |
 | `src/shared/storage.js` | 44 | `readStorage`, `writeStorage`, `loadJSON`. Copies `office-essay:speed` onto `teleprompter:speed` when the new key is missing |
 | `src/shared/html.js` | 11 | `escapeHtml` and `escapeAttr` |
 | `src/shared/row-menu.js` | 102 | Right-click row menu |
+
+## Takes
+
+`Documents/Teleprompter` is the list of takes in the Windows app. A take is `<name>.m4a` plus `<name>.json` (`version`, `textKey`, `durationMs`, `createdAt`, `peaks`, `mime`). Names that already exist get `-2`, `-3`, and so on. Directories whose names start with `.`, including `.sessions/`, are not takes.
+
+`takes_list` scans that folder. A missing or unreadable sidecar falls back to the code and the local timestamp in the file name, and to a probed duration. `takes_delete` removes the audio file and the sidecar. `takes_read` returns the audio bytes for playback; the read stays inside the folder. A debounced watcher emits `takes://changed`. The page also rescans when it starts and when the window gains focus.
+
+The first launch copies each IndexedDB take that does not already have a non-empty file, writes the sidecar for a file that is already there, and only then deletes the blob. `teleprompter:takesMigrated` is set after that finishes. Stopping halfway leaves the flag unset, and the next launch continues.
+
+Outside the Tauri window the same store methods keep an in-memory list and still write the blob to IndexedDB, so the Playwright page can record a take and read it back.

@@ -14,6 +14,7 @@ export const SAVE_TAKE_MESSAGE = 'Could not save this take.'
 export const DISK_TAKE_MESSAGE = 'Could not save the take to Documents.'
 export const DELETE_TAKE_MESSAGE = 'Could not delete this take.'
 export const SHOW_TAKE_MESSAGE = 'Could not show that file.'
+export const PLAY_TAKE_MESSAGE = 'Could not play that take.'
 
 const INLINE_MESSAGES = new Set([
   DEVICE_LOST_MESSAGE,
@@ -27,7 +28,7 @@ const INLINE_MESSAGES = new Set([
   DISK_TAKE_MESSAGE,
 ])
 
-const TOAST_MESSAGES = new Set([DELETE_TAKE_MESSAGE, SHOW_TAKE_MESSAGE])
+const TOAST_MESSAGES = new Set([DELETE_TAKE_MESSAGE, SHOW_TAKE_MESSAGE, PLAY_TAKE_MESSAGE])
 
 const SAVE_MESSAGES = new Set([QUOTA_TAKE_MESSAGE, SAVE_TAKE_MESSAGE, DISK_TAKE_MESSAGE])
 
