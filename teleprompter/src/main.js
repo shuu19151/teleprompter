@@ -5,18 +5,17 @@ import '@fontsource/literata/latin-400.css'
 import '@fontsource/literata/latin-700.css'
 import './style.css'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import {
-  essayStorageRecord,
-  itemKey,
-  positionApplies,
-  positionStorageRecord,
-} from './library/content-selection.js'
+import { essayStorageRecord, itemKey, positionApplies } from './library/content-selection.js'
 import { isEssayFile } from './library/essay-files.js'
 import { inTauri } from './library/essay-folder.js'
 import { createLibrary } from './library/library-controller.js'
 import { createImportDialog } from './library/import-dialog.js'
 import { parseEssay } from './library/import-store.js'
 import { createSidebar, stageEmptyMessage } from './library/sidebar-view.js'
+import { advanceReading, parseSpeed, wheelDistance as wheelPixels } from './reading/reader-controller.js'
+import { FONT_MAX, FONT_MIN, clampFontSize, parseFontSize } from './reading/reader-layout.js'
+import { capturedPlace, savedReadingPosition } from './reading/reader-progress.js'
+import { renderScriptHtml } from './reading/reader-view.js'
 import {
   READING_RATIO,
   anchorOffset,
@@ -74,9 +73,6 @@ const SPEED_KEY = 'teleprompter:speed'
 const ESSAY_KEY = 'teleprompter:essay'
 const POSITION_KEY = 'teleprompter:position'
 const FONT_KEY = 'teleprompter:fontSize'
-const FONT_MIN = 24
-const FONT_MAX = 56
-const FONT_DEFAULT = 32
 const SAVE_DELAY = 300
 const MIC_ICON = `<svg class="mic-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/><path d="M8.5 21h7"/></svg>`
 const LEGACY_KEYS = {
@@ -124,21 +120,11 @@ function loadJSON(key) {
 }
 
 function loadSpeed() {
-  try {
-    const raw = readStorage(SPEED_KEY)
-    if (raw === null) return 20
-    const saved = Number(JSON.parse(raw))
-    if (Number.isInteger(saved) && saved >= 1 && saved <= 50) return saved
-  } catch {
-    /* keep the default */
-  }
-  return 20
+  return parseSpeed(readStorage(SPEED_KEY))
 }
 
 function loadFontSize() {
-  const saved = Number(loadJSON(FONT_KEY))
-  if (Number.isInteger(saved) && saved >= FONT_MIN && saved <= FONT_MAX) return saved
-  return FONT_DEFAULT
+  return parseFontSize(loadJSON(FONT_KEY))
 }
 
 function essaysFromGlob() {
@@ -195,10 +181,7 @@ function maxOffset() {
 }
 
 function renderLines(body) {
-  return body
-    .split('\n')
-    .map((line) => (line.trim() ? `<p class="line">${escapeHtml(line)}</p>` : '<div class="gap"></div>'))
-    .join('')
+  return renderScriptHtml(body, escapeHtml)
 }
 
 function measure() {
@@ -370,15 +353,14 @@ function saveProgress() {
   const record = essayStorageRecord(essay)
   writeStorage(ESSAY_KEY, JSON.stringify(record))
   const metric = lineMetrics[activeIndex]
-  if (metric && offsetCache.height) {
-    const fraction = fractionAtOffset(metric.top, metric.height)
-    writeStorage(
-      POSITION_KEY,
-      JSON.stringify(positionStorageRecord({ index: activeIndex, fraction, id: record.id, useLine: true })),
-    )
-    return
-  }
-  writeStorage(POSITION_KEY, JSON.stringify(positionStorageRecord({ offset: state.offset, id: record.id })))
+  const hasLine = Boolean(metric && offsetCache.height)
+  const fraction = hasLine ? fractionAtOffset(metric.top, metric.height) : 0
+  writeStorage(
+    POSITION_KEY,
+    JSON.stringify(
+      savedReadingPosition({ hasLine, index: activeIndex, fraction, offset: state.offset, id: record.id }),
+    ),
+  )
 }
 
 function tick(now) {
@@ -390,25 +372,21 @@ function tick(now) {
   if (!lastTime) lastTime = now
   const dt = Math.min(0.05, (now - lastTime) / 1000)
   lastTime = now
-  if (state.running) state.offset += pixelsPerSecond() * dt
-  if (gliding) {
-    const step = wheelLeft * (1 - Math.exp(-dt / 0.16))
-    wheelLeft -= step
-    state.offset += step
-  }
-  const limit = maxOffset()
-  if (state.offset >= limit) {
-    state.offset = limit
-    wheelLeft = Math.min(0, wheelLeft)
-    if (state.running) {
-      state.running = false
-      syncRunButton()
-      saveProgressNow()
-      // The last line stops the scroll only. Recording keeps going until Stop.
-    }
-  } else if (state.offset < 0) {
-    state.offset = 0
-    wheelLeft = Math.max(0, wheelLeft)
+  const step = advanceReading({
+    offset: state.offset,
+    running: state.running,
+    wheelLeft,
+    dt,
+    rate: pixelsPerSecond(),
+    limit: maxOffset(),
+  })
+  state.offset = step.offset
+  wheelLeft = step.wheelLeft
+  state.running = step.running
+  if (step.reachedEnd) {
+    syncRunButton()
+    saveProgressNow()
+    // The last line stops the scroll only. Recording keeps going until Stop.
   }
   applyOffset()
   scheduleSave()
@@ -427,9 +405,7 @@ function startLoop() {
 
 function wheelDistance(event) {
   const view = document.querySelector('#text-view')
-  if (event.deltaMode === 1) return event.deltaY * 16
-  if (event.deltaMode === 2) return event.deltaY * (view?.clientHeight || 0)
-  return event.deltaY
+  return wheelPixels(event.deltaMode, event.deltaY, view?.clientHeight || 0)
 }
 
 function scrollBy(distance) {
@@ -512,9 +488,7 @@ function restorePosition() {
 }
 
 function capturedReadingPlace() {
-  const index = activeIndex >= 0 ? activeIndex : anchor?.index ?? 0
-  const fraction = anchor && anchor.index === index && Number.isFinite(anchor.fraction) ? anchor.fraction : 0
-  return { index: Math.max(0, index), fraction }
+  return capturedPlace(activeIndex, anchor)
 }
 
 function placeReading(index, fraction) {
@@ -522,8 +496,8 @@ function placeReading(index, fraction) {
 }
 
 function applyFontSize(next) {
-  const size = Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(Number(next))))
-  if (!Number.isInteger(size)) return
+  const size = clampFontSize(next)
+  if (size === null) return
   state.fontSize = size
   writeStorage(FONT_KEY, JSON.stringify(size))
   document.documentElement.style.setProperty('--script-size', `${size}px`)
