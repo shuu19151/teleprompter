@@ -26,6 +26,7 @@ import {
   onTakesClick,
   onTakesContextMenu,
   onTakesMenuKey,
+  onThemeChange,
   onVoiceEnhanceChange,
   paintPlayback,
   paintRecording,
@@ -324,7 +325,7 @@ ${importDialog.markup()}
 ${confirmDialog.markup()}
   `
   sidebar.bind()
-  bindThemeToggle()
+  bindThemeToggle({ onThemeChange })
   const takesList = document.querySelector('#takes-list')
   takesList?.addEventListener('click', onTakesClick)
   takesList?.addEventListener('contextmenu', onTakesContextMenu)

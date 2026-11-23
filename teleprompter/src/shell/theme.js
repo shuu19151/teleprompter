@@ -32,21 +32,17 @@ export function theme() {
   return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'
 }
 
-export function setTheme(next) {
+export function setTheme(next, hooks = {}) {
   if (next === 'dark') document.documentElement.dataset.theme = 'dark'
   else delete document.documentElement.dataset.theme
   writeThemeStorage(JSON.stringify(next))
   const button = document.querySelector('#theme')
   if (button) button.textContent = next === 'dark' ? 'Light' : 'Dark'
-  // Moved with setTheme. colorCache is private to recorder-ui.js, so this
-  // assignment still throws and the repaint below does not run.
-  colorCache = { theme: '', ink: '', line: '' }
-  if (recorderMode() === 'recording') paintRecording()
-  else if (recorderMode() === 'playback') paintPlayback()
+  hooks.onThemeChange?.()
 }
 
-export function bindThemeToggle() {
+export function bindThemeToggle(hooks = {}) {
   document.querySelector('#theme').addEventListener('click', () => {
-    setTheme(theme() === 'dark' ? 'light' : 'dark')
+    setTheme(theme() === 'dark' ? 'light' : 'dark', hooks)
   })
 }

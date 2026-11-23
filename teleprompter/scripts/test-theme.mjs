@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { readThemeStorage, writeThemeStorage } from '../src/shell/theme.js'
+import { readThemeStorage, setTheme, writeThemeStorage } from '../src/shell/theme.js'
 
 function memoryStorage(initial = {}, { failSet = false, failGet = false } = {}) {
   const data = { ...initial }
@@ -51,4 +51,43 @@ test('theme writes the JSON string for the chosen theme', () => {
   const storage = memoryStorage()
   writeThemeStorage(JSON.stringify('dark'), storage)
   assert.equal(storage.data['teleprompter:theme'], '"dark"')
+})
+
+test('setTheme stores the choice and tells the waveform to repaint', () => {
+  const root = { dataset: {} }
+  const button = { textContent: 'Dark' }
+  const previousDocument = globalThis.document
+  const previousStorage = globalThis.localStorage
+  globalThis.document = {
+    documentElement: root,
+    querySelector(selector) {
+      return selector === '#theme' ? button : null
+    },
+  }
+  globalThis.localStorage = memoryStorage()
+  try {
+    let paints = 0
+    setTheme('dark', {
+      onThemeChange() {
+        paints += 1
+      },
+    })
+    assert.equal(root.dataset.theme, 'dark')
+    assert.equal(button.textContent, 'Light')
+    assert.equal(globalThis.localStorage.data['teleprompter:theme'], '"dark"')
+    assert.equal(paints, 1)
+
+    setTheme('light', {
+      onThemeChange() {
+        paints += 1
+      },
+    })
+    assert.equal(root.dataset.theme, undefined)
+    assert.equal(button.textContent, 'Dark')
+    assert.equal(globalThis.localStorage.data['teleprompter:theme'], '"light"')
+    assert.equal(paints, 2)
+  } finally {
+    globalThis.document = previousDocument
+    globalThis.localStorage = previousStorage
+  }
 })
