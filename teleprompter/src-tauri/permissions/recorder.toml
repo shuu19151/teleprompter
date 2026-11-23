@@ -1,0 +1,19 @@
+[[permission]]
+identifier = "allow-recorder-start"
+description = "Enables the recorder_start command."
+commands.allow = ["recorder_start"]
+
+[[permission]]
+identifier = "allow-recorder-stop"
+description = "Enables the recorder_stop command."
+commands.allow = ["recorder_stop"]
+
+[[permission]]
+identifier = "allow-recorder-status"
+description = "Enables the recorder_status command."
+commands.allow = ["recorder_status"]
+
+[[permission]]
+identifier = "allow-recorder-cancel"
+description = "Enables the recorder_cancel command."
+commands.allow = ["recorder_cancel"]
