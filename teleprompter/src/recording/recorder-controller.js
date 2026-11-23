@@ -3,9 +3,9 @@
  * into one M4A file, and take-disk.js writes the Documents copy.
  */
 import { saveTakeToDocuments } from './take-disk.js'
+import { createRecorderBackend } from './recorder-backend.js'
 import {
   addTake,
-  createCapture,
   describeMediaError,
   isQuotaError as isIdbQuotaError,
 } from './recording.js'
@@ -48,7 +48,7 @@ function loadRecWithRun() {
   return true
 }
 
-export function createRecorderController({ microphone, ui, wave, takes, deps }) {
+export function createRecorderController({ microphone, ui, wave, takes, deps, recorderKind = 'web' }) {
   let recWithRun = loadRecWithRun()
   let recordingMeta = null
   let saveTask = null
@@ -58,12 +58,27 @@ export function createRecorderController({ microphone, ui, wave, takes, deps }) 
   let openAfterSave = true
   let playback = null
 
-  const capture = createCapture({
+  const capture = createRecorderBackend(recorderKind, {
     onError() {
       onCaptureError()
     },
     onStopped(result) {
       onCaptureStopped(result)
+    },
+    onMeter(meter) {
+      wave.ingestMeter(meter)
+    },
+    onPeaks(batch) {
+      wave.ingestPeaks(batch)
+    },
+    armWave(stepMs) {
+      wave.armExternalPeaks(stepMs)
+    },
+    disarmWave() {
+      wave.disarmExternalPeaks()
+    },
+    getTextKey() {
+      return (recordingMeta || takeMeta())?.textKey || ''
     },
   })
 
@@ -217,7 +232,7 @@ export function createRecorderController({ microphone, ui, wave, takes, deps }) 
     releasePlayback()
     wave.stopPlayLoop()
     microphone.closeAudioGraph()
-    microphone.ensureAudioContext()
+    if (capture.usesWebCapture !== false) microphone.ensureAudioContext()
     ui.showRecMessage('')
     wave.resetPeaks()
     wave.resetRulerTrack()

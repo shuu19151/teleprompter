@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { exportPeakSlice, nextWaveColors, playbackDurationSec } from '../src/recording/waveform-view.js'
+import { applyPeakBatch, exportPeakSlice, meterLevel, nextWaveColors, playbackDurationSec } from '../src/recording/waveform-view.js'
 
 test('peak export keeps the newest samples once the ring wraps', () => {
   const ring = new Float32Array(4)
@@ -32,6 +32,26 @@ test('playback duration prefers the audio element, then the decode, then the tak
     3.25,
   )
   assert.equal(playbackDurationSec({ audio: { duration: Number.NaN }, take: { durationMs: 0 } }), 0)
+})
+
+test('a meter uses the same peak and rms mix as the live waveform', () => {
+  assert.equal(meterLevel(null), 0)
+  assert.equal(meterLevel({ peak: 0.4, rms: 0.2 }), 0.5)
+  assert.equal(meterLevel({ peak: 0.2, rms: 0.1 }), 0.25)
+  assert.equal(meterLevel({ peak: 1.4, rms: 0.2, clipped: true }), 1)
+  assert.equal(meterLevel({ peak: Number.NaN, rms: 0.1 }), 0.25)
+})
+
+test('native peak batches land on their start index', () => {
+  const ring = new Float32Array(4)
+  let count = applyPeakBatch(ring, 0, 4, { startIndex: 0, values: [0.25, 0.5] })
+  assert.equal(count, 2)
+  assert.deepEqual([...ring], [0.25, 0.5, 0, 0])
+  count = applyPeakBatch(ring, count, 4, { startIndex: 2, values: [0.75, 1.5, -1] })
+  assert.equal(count, 5)
+  assert.deepEqual([...ring], [0, 0.5, 0.75, 1])
+  assert.equal(applyPeakBatch(ring, count, 4, null), count)
+  assert.equal(applyPeakBatch(ring, count, 0, { values: [1] }), count)
 })
 
 test('wave colors stay cached until the theme key is cleared', () => {

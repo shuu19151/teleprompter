@@ -19,6 +19,36 @@ import {
 
 const PEAK_RING_SIZE = 16384
 
+export function clampUnit(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number) || number <= 0) return 0
+  if (number >= 1) return 1
+  return number
+}
+
+/** Same mix as sampleLevel: the louder of the peak and 2.5× RMS, clamped to 0–1. */
+export function meterLevel(meter) {
+  if (!meter) return 0
+  const peak = Math.abs(Number(meter.peak) || 0)
+  const rms = Math.abs(Number(meter.rms) || 0)
+  return clampUnit(Math.max(peak, rms * 2.5))
+}
+
+/** Write one native peak batch into the ring. `startIndex` is the first bar. */
+export function applyPeakBatch(ring, count, size, batch) {
+  const values = batch?.values
+  if (!values || typeof values.length !== 'number' || size <= 0) return count
+  const start = Number(batch.startIndex)
+  const origin = Number.isFinite(start) && start > 0 ? Math.floor(start) : 0
+  let next = count
+  for (let i = 0; i < values.length; i += 1) {
+    const index = origin + i
+    ring[index % size] = clampUnit(values[i])
+    if (index + 1 > next) next = index + 1
+  }
+  return next
+}
+
 export function exportPeakSlice(ring, count, size) {
   const available = Math.min(count, size)
   const origin = count - available
@@ -50,6 +80,9 @@ export function createWaveformView({ getAnalyser, resumeAudio, getElapsedMs, get
   const peakRing = new Float32Array(PEAK_RING_SIZE)
   let peakCount = 0
   let peakLive = 0
+  let externalPeaks = false
+  let externalLive = 0
+  let sampleStepMs = WAVE_STEP_MS
   let rulerBuilt = { key: '', have: new Set() }
   let waveGen = 0
   let playGen = 0
@@ -83,6 +116,32 @@ export function createWaveformView({ getAnalyser, resumeAudio, getElapsedMs, get
   function resetPeaks() {
     peakCount = 0
     peakLive = 0
+    externalLive = 0
+    externalPeaks = false
+    sampleStepMs = WAVE_STEP_MS
+  }
+
+  function armExternalPeaks(stepMs) {
+    externalPeaks = true
+    const step = Number(stepMs)
+    sampleStepMs = step > 0 ? step : WAVE_STEP_MS
+  }
+
+  function disarmExternalPeaks() {
+    externalPeaks = false
+    externalLive = 0
+    sampleStepMs = WAVE_STEP_MS
+  }
+
+  function ingestMeter(meter) {
+    if (!externalPeaks) return
+    externalLive = meterLevel(meter)
+    peakLive = externalLive
+  }
+
+  function ingestPeaks(batch) {
+    if (!externalPeaks) return
+    peakCount = applyPeakBatch(peakRing, peakCount, PEAK_RING_SIZE, batch)
   }
 
   function pushPeak(level) {
@@ -199,6 +258,7 @@ export function createWaveformView({ getAnalyser, resumeAudio, getElapsedMs, get
       nowSec,
       centerX,
       pxPerSec,
+      step: sampleStepMs / 1000,
     })
     for (let i = first; i < peakCount; i += 1) {
       const t = (i + 0.5) * step
@@ -249,13 +309,17 @@ export function createWaveformView({ getAnalyser, resumeAudio, getElapsedMs, get
     const elapsed = getElapsedMs()
     const nowSec = Math.max(0, elapsed / 1000)
     if (getCapturePhase() === 'recording') {
-      const expected = Math.floor(elapsed / WAVE_STEP_MS)
-      let guard = 0
-      while (peakCount < expected && guard < 8) {
-        pushPeak(sampleLevel(getAnalyser()))
-        guard += 1
+      if (externalPeaks) {
+        peakLive = externalLive
+      } else {
+        const expected = Math.floor(elapsed / WAVE_STEP_MS)
+        let guard = 0
+        while (peakCount < expected && guard < 8) {
+          pushPeak(sampleLevel(getAnalyser()))
+          guard += 1
+        }
+        peakLive = sampleLevel(getAnalyser())
       }
-      peakLive = sampleLevel(getAnalyser())
     }
     const clock = document.querySelector('#recorder-clock')
     if (clock) clock.textContent = formatFine(elapsed)
@@ -405,6 +469,10 @@ export function createWaveformView({ getAnalyser, resumeAudio, getElapsedMs, get
     invalidateColors,
     onThemeChange,
     resetPeaks,
+    armExternalPeaks,
+    disarmExternalPeaks,
+    ingestMeter,
+    ingestPeaks,
     exportPeaks,
     resetRulerTrack,
     paintRecording,

@@ -1,12 +1,10 @@
 //! Microphone capture.
 //!
 //! The cpal callback converts each frame to one mono `f32` and pushes it into
-//! the ring. It does not lock, allocate, resample, or touch the filesystem.
-//! A later peak meter can publish an atomic from this same callback.
+//! the ring. It does not lock, allocate, resample, emit, or touch the filesystem.
+//! A stream failure only raises [`note_stream_fault`]; the writer thread emits it.
 
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(test)]
 use std::thread::JoinHandle;
@@ -74,10 +72,16 @@ pub fn u16_to_f32(sample: u16) -> f32 {
   (centered / 32768.0).clamp(-1.0, 1.0)
 }
 
+/// The audio callback's only failure signal. The writer thread reads it.
+pub fn note_stream_fault(fault: &AtomicBool) {
+  fault.store(true, Ordering::Release);
+}
+
 pub fn start_input(
   opened: OpenedInput,
   producer: Producer<f32>,
   dropped: Arc<AtomicU64>,
+  fault: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, RecorderError> {
   let channels = opened.channels;
   let config = opened.stream_config;
@@ -87,6 +91,7 @@ pub fn start_input(
       config,
       producer,
       dropped,
+      fault,
       channels,
       f32_sample,
     )?,
@@ -95,6 +100,7 @@ pub fn start_input(
       config,
       producer,
       dropped,
+      fault,
       channels,
       i16_to_f32,
     )?,
@@ -103,6 +109,7 @@ pub fn start_input(
       config,
       producer,
       dropped,
+      fault,
       channels,
       u16_to_f32,
     )?,
@@ -118,6 +125,7 @@ fn build_stream<T>(
   config: cpal::StreamConfig,
   mut producer: Producer<f32>,
   dropped: Arc<AtomicU64>,
+  fault: Arc<AtomicBool>,
   channels: u16,
   to_f32: fn(T) -> f32,
 ) -> Result<cpal::Stream, RecorderError>
@@ -130,7 +138,10 @@ where
       move |data: &[T], _| {
         push_frames(data, channels, &mut producer, &dropped, to_f32);
       },
-      |error| log::error!("microphone stream error: {error}"),
+      move |error| {
+        log::error!("microphone stream error: {error}");
+        note_stream_fault(&fault);
+      },
       None,
     )
     .map_err(|error| RecorderError::Capture(error.to_string()))
@@ -258,6 +269,13 @@ mod tests {
     assert_eq!(dropped.load(Ordering::Relaxed), 0);
     assert!(near(consumer.pop().unwrap(), 0.5));
     assert!(consumer.pop().is_err());
+  }
+
+  #[test]
+  fn a_stream_fault_is_only_an_atomic() {
+    let fault = AtomicBool::new(false);
+    note_stream_fault(&fault);
+    assert!(fault.load(Ordering::Acquire));
   }
 
   fn near(actual: f32, expected: f32) -> bool {
