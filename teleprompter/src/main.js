@@ -16,6 +16,7 @@ import { createReaderController } from './reading/reader-controller.js'
 import { createReaderLayout } from './reading/reader-layout.js'
 import { createReaderProgress } from './reading/reader-progress.js'
 import { createReaderView } from './reading/reader-view.js'
+import { hasTauriGlobal, readNativeRecorderEnabled, selectRecorderBackend } from './recording/recorder-backend.js'
 import { createRecorder } from './recording/recorder-ui.js'
 import { mountApp } from './shell/app-shell.js'
 import { createConfirmDialog } from './shell/confirm-dialog.js'
@@ -30,7 +31,22 @@ const bundledEssays = loadBundledEssays()
 
 const confirmDialog = createConfirmDialog()
 
+function startupStorage() {
+  try {
+    return globalThis.localStorage
+  } catch {
+    return null
+  }
+}
+
+// Read once. A later write to tp.nativeRecorder does nothing until the next load.
+const recorderKind = selectRecorderBackend({
+  hasTauri: hasTauriGlobal(globalThis.window),
+  nativeEnabled: readNativeRecorderEnabled(startupStorage()),
+})
+
 const recorder = createRecorder({
+  recorderKind,
   isRunning: () => reader.isRunning(),
   pauseRun: () => reader.pauseRun(),
   playRun: () => reader.playRun(),

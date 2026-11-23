@@ -46,7 +46,14 @@ export function createRecorder(deps) {
     deps,
   })
 
-  recorder = createRecorderController({ microphone, ui, wave, takes, deps })
+  recorder = createRecorderController({
+    microphone,
+    ui,
+    wave,
+    takes,
+    deps,
+    recorderKind: deps.recorderKind,
+  })
 
   function refreshAudioInputs() {
     return microphone.refreshAudioInputs()
