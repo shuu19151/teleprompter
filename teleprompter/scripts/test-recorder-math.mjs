@@ -23,7 +23,7 @@ import {
   timeAtPointer,
   timelineScale,
   waveX,
-} from '../src/recorder-math.js'
+} from '../src/recording/recorder-math.js'
 
 const essay = { kind: 'essay', code: 'E01', title: 'How I Stay Productive', file: 'E01-how.txt' }
 const imported = { kind: 'import', id: 'imp-1', code: 'U1', title: 'Market notes', file: 'imp-1' }

@@ -12,7 +12,7 @@ import {
   positionApplies,
   positionStorageRecord,
   resolveSelection,
-} from '../src/content-selection.js'
+} from '../src/library/content-selection.js'
 
 const essays = [
   { kind: 'essay', file: 'E01-how-i-stay-productive-and-calm.txt', code: 'E01', title: 'How I Stay Productive and Calm at Work' },

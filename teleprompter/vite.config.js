@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
-import { isEssayFile } from './src/essay-files.js'
+import { isEssayFile } from './src/library/essay-files.js'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 const essaysDir = path.resolve(root, '../essays')

@@ -34,10 +34,10 @@ import {
   timelineScale,
   waveX,
 } from './recorder-math.js'
-import { inTauri } from './essay-folder.js'
-import { elementFromEvent, openRowMenu } from './row-menu.js'
+import { inTauri } from '../library/essay-folder.js'
+import { elementFromEvent, openRowMenu } from '../shared/row-menu.js'
 import { revealTakeFile, saveTakeToDocuments } from './take-disk.js'
-import { bridge } from './ui-bridge.js'
+import { bridge } from '../ui-bridge.js'
 
 const REC_WITH_RUN_KEY = 'teleprompter:recWithRun'
 const MIC_KEY = 'teleprompter:micId'
