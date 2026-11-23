@@ -209,6 +209,7 @@ async function start() {
     await bindWindowClose(async () => {
       progress.saveProgressNow()
       await recorder.stopRecordingAndSave({ openAfter: false })
+      recorder.notePageVisibility(false)
     })
   }
   await library.bootFolder()
@@ -234,7 +235,11 @@ void start()
 
 bindPageLeave(() => {
   progress.saveProgressNow()
-  if (recorder.recordingActive()) void recorder.stopRecordingAndSave()
+  recorder.notePageVisibility(false)
+})
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') recorder.notePageVisibility(true)
 })
 
 fullscreen.bindChange()

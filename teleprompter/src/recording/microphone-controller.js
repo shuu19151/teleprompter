@@ -2,14 +2,13 @@
  * Microphone choice, the getUserMedia start, and the analyser graph.
  * The waveform reads the analyser this module exposes and does not own it.
  */
-import { DEVICE_LOST_MESSAGE } from './rec-messages.js'
+import { DEVICE_LOST_MESSAGE, describeMediaError } from './rec-messages.js'
 import { micAudioConstraints } from './recording.js'
 import { micControlState } from './recorder-math.js'
 
 export { DEVICE_LOST_MESSAGE }
 
 const MIC_KEY = 'teleprompter:micId'
-const VOICE_KEY = 'teleprompter:voiceEnhance'
 
 /** Native devices, default first, in the shape the existing menu already renders. */
 export function nativeMicOptions(devices) {
@@ -63,29 +62,11 @@ export function listedAudioInputs(devices) {
   return { labeled: true, inputs: listed }
 }
 
-function readStorage(key) {
+function pageIsVisible() {
   try {
-    return localStorage.getItem(key)
+    return document.visibilityState !== 'hidden'
   } catch {
-    return null
-  }
-}
-
-function writeStorage(key, value) {
-  try {
-    localStorage.setItem(key, value)
-  } catch {
-    /* ignore quota or private mode */
-  }
-}
-
-function loadJSON(key) {
-  try {
-    const raw = readStorage(key)
-    if (raw === null) return null
-    return JSON.parse(raw)
-  } catch {
-    return null
+    return true
   }
 }
 
@@ -95,16 +76,21 @@ export function createMicrophoneController({
   nativeDevices = null,
   onDeviceLost,
   onInputDeviceFound,
+  showRecMessage,
+  onMicReady,
+  stopIfActive,
 } = {}) {
   let audioCtx = null
   let analyser = null
   let waveSource = null
   let waveMute = null
   let micId = loadMicId()
-  let voiceEnhance = loadVoiceEnhance()
   let audioInputs = []
   let micListToken = 0
   let nativeWatching = false
+  let readerOpen = false
+  let wantOpen = pageIsVisible()
+  let generation = 0
 
   function loadMicId() {
     try {
@@ -113,12 +99,6 @@ export function createMicrophoneController({
     } catch {
       return ''
     }
-  }
-
-  function loadVoiceEnhance() {
-    const saved = loadJSON(VOICE_KEY)
-    if (typeof saved === 'boolean') return saved
-    return true
   }
 
   function saveMicId(id) {
@@ -198,7 +178,6 @@ export function createMicrophoneController({
     const controls = micControlState({ mode: getPanelMode(), phase: getCapture().phase })
     if (row) row.hidden = controls.panelOpen
     for (const select of document.querySelectorAll('select.mic-select')) select.disabled = controls.busy
-    for (const input of document.querySelectorAll('input.voice-enhance-input')) input.disabled = controls.busy
   }
 
   function micOptions() {
@@ -288,6 +267,10 @@ export function createMicrophoneController({
     }
     saveMicId(value)
     renderMicSelects()
+    if (readerOpen && wantOpen) {
+      const token = ++generation
+      void acquire(token)
+    }
   }
 
   function chosenMicId() {
@@ -296,27 +279,84 @@ export function createMicrophoneController({
     return micId
   }
 
-  function syncVoiceEnhanceInputs() {
-    for (const input of document.querySelectorAll('input.voice-enhance-input')) input.checked = voiceEnhance
+  async function openPrepared(deviceId) {
+    const capture = getCapture()
+    try {
+      return await capture.prepare(micAudioConstraints(deviceId), { voiceEnhance: true, deviceId })
+    } catch (error) {
+      if (!(deviceId && isMissingMicError(error))) throw error
+      saveMicId('')
+      renderMicSelects()
+      return capture.prepare(micAudioConstraints(''), { voiceEnhance: true, deviceId: '' })
+    }
   }
 
-  function onVoiceEnhanceChange(event) {
-    voiceEnhance = Boolean(event.target.checked)
-    writeStorage(VOICE_KEY, JSON.stringify(voiceEnhance))
-    syncVoiceEnhanceInputs()
+  function canWarm(capture) {
+    return !!capture && capture.usesWebCapture !== false && typeof capture.prepare === 'function'
+  }
+
+  async function acquire(token) {
+    const capture = getCapture()
+    if (!canWarm(capture)) return
+    if (!readerOpen || !wantOpen) return
+    if (capture.isActive?.()) return
+    const deviceId = chosenMicId()
+    try {
+      const result = await openPrepared(deviceId)
+      if (token !== generation || !readerOpen || !wantOpen) return
+      if (!result?.prepared) return
+      onMicReady?.()
+    } catch (error) {
+      if (token !== generation || !readerOpen || !wantOpen) return
+      showRecMessage?.(describeMediaError(error))
+    }
+  }
+
+  async function releaseAfterIdle(token) {
+    const capture = getCapture()
+    if (capture?.isActive?.()) {
+      try {
+        await stopIfActive?.()
+      } catch {
+        /* stop reports its own failure */
+      }
+    }
+    if (token !== generation) return
+    const current = getCapture()
+    if (current?.phase === 'recording' || current?.phase === 'paused' || current?.phase === 'stopping') return
+    try {
+      current?.releasePrepared?.()
+    } catch {
+      /* already released */
+    }
+  }
+
+  function refreshWarm() {
+    const token = ++generation
+    if (readerOpen && wantOpen) void acquire(token)
+    else void releaseAfterIdle(token)
+  }
+
+  function noteReaderOpen(open) {
+    readerOpen = !!open
+    refreshWarm()
+  }
+
+  function notePageVisibility(visible) {
+    wantOpen = !!visible
+    refreshWarm()
   }
 
   async function openCapture() {
     const capture = getCapture()
     const deviceId = chosenMicId()
-    const enhance = voiceEnhance
     try {
-      return await capture.start(micAudioConstraints(deviceId), { voiceEnhance: enhance, deviceId })
+      return await capture.start(micAudioConstraints(deviceId), { voiceEnhance: true, deviceId })
     } catch (error) {
       if (deviceId && isMissingMicError(error)) {
         saveMicId('')
         renderMicSelects()
-        return capture.start(micAudioConstraints(''), { voiceEnhance: enhance, deviceId: '' })
+        return capture.start(micAudioConstraints(''), { voiceEnhance: true, deviceId: '' })
       }
       throw error
     }
@@ -325,9 +365,6 @@ export function createMicrophoneController({
   return {
     getAnalyser() {
       return analyser
-    },
-    isVoiceEnhance() {
-      return voiceEnhance
     },
     closeAudioGraph,
     ensureAudioContext,
@@ -338,7 +375,8 @@ export function createMicrophoneController({
     refreshAudioInputs,
     watchNativeDevices,
     onMicChange,
-    onVoiceEnhanceChange,
+    noteReaderOpen,
+    notePageVisibility,
     openCapture,
   }
 }

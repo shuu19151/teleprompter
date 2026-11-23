@@ -27,10 +27,12 @@ export function createRecorder(deps) {
         : null,
     onDeviceLost: (payload) => recorder.onDeviceLost(payload),
     onInputDeviceFound: () => ui?.noteDeviceReturned(),
+    showRecMessage: (message) => ui?.showRecMessage(message),
+    onMicReady: () => ui?.noteMicReady(),
+    stopIfActive: () => (recorder.recordingActive() ? recorder.stopRecordingAndSave() : null),
   })
 
   ui = createRecorderView({
-    getVoiceEnhance: () => microphone.isVoiceEnhance(),
     getPanelMode: () => recorder.getMode(),
     getCapturePhase: () => recorder.capture.phase,
     getPlayback: () => recorder.getPlayback(),
@@ -90,8 +92,11 @@ export function createRecorder(deps) {
     onMicChange(event) {
       microphone.onMicChange(event)
     },
-    onVoiceEnhanceChange(event) {
-      microphone.onVoiceEnhanceChange(event)
+    noteReaderOpen(open) {
+      return microphone.noteReaderOpen(open)
+    },
+    notePageVisibility(visible) {
+      return microphone.notePageVisibility(visible)
     },
     resetRulerTrack() {
       wave.resetRulerTrack()
@@ -146,9 +151,6 @@ export function createRecorder(deps) {
     },
     onTakesClick(event) {
       takes.onTakesClick(event)
-    },
-    voiceEnhanceControl(id) {
-      return ui.voiceEnhanceControl(id)
     },
     isRecWithRun() {
       return recorder.isRecWithRun()

@@ -60,6 +60,39 @@ export function sampleLevel(analyser) {
   return Math.min(1, Math.max(peak, rms * 2.5))
 }
 
+/** How long Rec waits for a real sample before the take starts anyway. */
+export const LEADING_SIGNAL_TIMEOUT_MS = 1500
+/** How often the live stream is checked for that first sample. */
+export const LEADING_SIGNAL_POLL_MS = 20
+
+/** True when any sample is not an exact digital zero. Negative zero counts as zero. */
+export function hasNonZeroSample(samples) {
+  if (!samples || typeof samples.length !== 'number') return false
+  for (let i = 0; i < samples.length; i += 1) {
+    if (samples[i] !== 0) return true
+  }
+  return false
+}
+
+/**
+ * 'start' on the first non-zero sample, or once the safety timeout has passed.
+ * Until then the take clock and the recorder stay off, so a take does not
+ * begin with the device's startup block of digital zeros.
+ */
+export function leadingSignalDecision(samples, elapsedMs, timeoutMs = LEADING_SIGNAL_TIMEOUT_MS) {
+  if (hasNonZeroSample(samples)) return 'start'
+  if (Number(elapsedMs) >= timeoutMs) return 'start'
+  return 'wait'
+}
+
+function deviceKey(audio, options) {
+  if (options && typeof options.deviceId === 'string') return options.deviceId
+  const id = audio && typeof audio === 'object' ? audio.deviceId : null
+  if (typeof id === 'string') return id
+  if (id && typeof id.exact === 'string') return id.exact
+  return ''
+}
+
 /** One peak per bar across the whole buffer, mixing channels. */
 export function waveformPeaks(audioBuffer, bars) {
   const count = Math.max(1, bars | 0)
@@ -335,17 +368,22 @@ function buildVoiceGraph(ctx, rawStream) {
   return {
     nodes: [source, highpass, compressor, makeup, limiter, destination],
     stream: destination.stream,
+    // The limiter is the last stage. A monitor tap reads it without changing the chain.
+    monitor: limiter,
   }
 }
 
 /**
  * One microphone capture. pause/resume follow MediaRecorder when the browser
- * provides them; stop() always releases the mic tracks and the voice graph.
+ * provides them. stop() ends the recorder and keeps the warmed mic so the next
+ * take starts on a stream that is already flowing. releasePrepared() stops the
+ * tracks and closes the voice graph.
  * onError runs if the recorder fails or the mic track ends mid-take.
  * onStopped runs once stop() has a blob (or null). An mp4/AAC blob is remuxed
  * into one progressive M4A first. That blob is what playback, IndexedDB, and
  * the Tauri Documents save all use. webm is left as recorded. If the remux
  * fails, the original blob is used.
+ * Voice enhance is always on. A passed `voiceEnhance: false` is ignored.
  */
 export function createCapture({ onError, onStopped } = {}) {
   let phase = 'idle'
@@ -353,6 +391,12 @@ export function createCapture({ onError, onStopped } = {}) {
   let inputStream = null
   let voiceCtx = null
   let voiceGraph = null
+  let voiceMonitor = null
+  let warmDeviceId = null
+  let warmGeneration = 0
+  let pendingOpen = null
+  let pendingDeviceId = null
+  let watchedStream = null
   let recorder = null
   let chunks = []
   let mimeType = ''
@@ -360,31 +404,215 @@ export function createCapture({ onError, onStopped } = {}) {
   let accumulated = 0
   let segmentStart = 0
   let cancelStart = false
+  let startSerial = 0
   let stopWait = null
 
-  function closeVoice() {
+  function disconnectGraph() {
     const graph = voiceGraph
     voiceGraph = null
-    if (graph?.nodes) {
-      for (const node of graph.nodes) {
-        try {
-          node.disconnect()
-        } catch {
-          /* already disconnected */
-        }
+    voiceMonitor = null
+    if (!graph?.nodes) return
+    for (const node of graph.nodes) {
+      try {
+        node.disconnect()
+      } catch {
+        /* already disconnected */
       }
     }
+  }
+
+  function closeVoice() {
+    disconnectGraph()
     const ctx = voiceCtx
     voiceCtx = null
     if (ctx && ctx.state !== 'closed') ctx.close().catch(() => {})
   }
 
-  function releaseStreams() {
-    closeVoice()
+  function releaseStreams({ keepContext = false } = {}) {
+    if (keepContext) disconnectGraph()
+    else closeVoice()
     stopTracks(inputStream)
     if (stream && stream !== inputStream) stopTracks(stream)
     inputStream = null
     stream = null
+    warmDeviceId = null
+    watchedStream = null
+  }
+
+  function tracksLive(mediaStream) {
+    if (!mediaStream || typeof mediaStream.getTracks !== 'function') return false
+    return mediaStream.getTracks().some((track) => track.readyState === 'live')
+  }
+
+  function streamReady(deviceId) {
+    return warmDeviceId === deviceId && tracksLive(inputStream) && !!stream
+  }
+
+  function primeVoiceContext() {
+    if (!voiceCtx || voiceCtx.state === 'closed') voiceCtx = createVoiceContext()
+    if (voiceCtx?.state === 'suspended') voiceCtx.resume().catch(() => {})
+    return voiceCtx
+  }
+
+  function watchInputTracks() {
+    if (!inputStream || watchedStream === inputStream) return
+    watchedStream = inputStream
+    for (const track of inputStream.getTracks()) {
+      track.addEventListener('ended', () => {
+        if (phase === 'recording' || phase === 'paused') onError?.()
+      })
+    }
+  }
+
+  async function openInput(audio, deviceId, generation) {
+    primeVoiceContext()
+    releaseStreams({ keepContext: true })
+    let opened = null
+    try {
+      opened = await navigator.mediaDevices.getUserMedia({ audio: cleanMicConstraints(audio) })
+      if (generation !== warmGeneration) {
+        stopTracks(opened)
+        return 'stale'
+      }
+      inputStream = opened
+      opened = null
+      warmDeviceId = deviceId
+      stream = inputStream
+      voiceMonitor = null
+      if (!voiceCtx || voiceCtx.state === 'closed') primeVoiceContext()
+      if (voiceCtx) {
+        try {
+          voiceGraph = buildVoiceGraph(voiceCtx, inputStream)
+          stream = voiceGraph.stream
+          voiceMonitor = voiceGraph.monitor || null
+          if (voiceCtx.state === 'suspended') await voiceCtx.resume().catch(() => {})
+        } catch {
+          disconnectGraph()
+          stream = inputStream
+          voiceMonitor = null
+        }
+      }
+      if (generation !== warmGeneration) {
+        releaseStreams({ keepContext: true })
+        return 'stale'
+      }
+      watchInputTracks()
+      return 'ready'
+    } catch (error) {
+      stopTracks(opened)
+      if (generation === warmGeneration) releaseStreams({ keepContext: true })
+      throw error
+    }
+  }
+
+  async function ensureInput(audio, deviceId) {
+    const id = deviceId || ''
+    if (streamReady(id)) return 'reused'
+    if (pendingOpen && pendingDeviceId === id) {
+      const status = await pendingOpen
+      if (streamReady(id)) return 'reused'
+      return status
+    }
+    const generation = ++warmGeneration
+    pendingDeviceId = id
+    const task = openInput(audio, id, generation)
+    pendingOpen = task
+    try {
+      return await task
+    } finally {
+      if (pendingOpen === task) pendingOpen = null
+    }
+  }
+
+  async function waitForLeadingSignal() {
+    const ctx = voiceCtx
+    if (!ctx || cancelStart || phase !== 'starting') return
+    if (ctx.state === 'suspended') await ctx.resume().catch(() => {})
+    if (cancelStart || phase !== 'starting') return
+    let analyser = null
+    let source = null
+    let mute = null
+    try {
+      analyser = ctx.createAnalyser()
+      analyser.fftSize = 1024
+      if (voiceMonitor && typeof voiceMonitor.connect === 'function') voiceMonitor.connect(analyser)
+      else if (inputStream) {
+        source = ctx.createMediaStreamSource(inputStream)
+        source.connect(analyser)
+      } else return
+      mute = ctx.createGain()
+      mute.gain.value = 0
+      analyser.connect(mute)
+      if (ctx.destination) mute.connect(ctx.destination)
+    } catch {
+      return
+    }
+    const samples = new Float32Array(analyser.fftSize || 1024)
+    const startedAt = performance.now()
+    let timer = 0
+    try {
+      await new Promise((resolve) => {
+        const tick = () => {
+          if (cancelStart || phase !== 'starting') {
+            resolve()
+            return
+          }
+          try {
+            analyser.getFloatTimeDomainData(samples)
+          } catch {
+            resolve()
+            return
+          }
+          if (leadingSignalDecision(samples, performance.now() - startedAt) === 'start') {
+            resolve()
+            return
+          }
+          timer = setTimeout(tick, LEADING_SIGNAL_POLL_MS)
+        }
+        tick()
+      })
+    } finally {
+      clearTimeout(timer)
+      try {
+        source?.disconnect()
+      } catch {
+        /* already disconnected */
+      }
+      try {
+        voiceMonitor?.disconnect?.(analyser)
+      } catch {
+        /* already disconnected */
+      }
+      try {
+        analyser.disconnect()
+      } catch {
+        /* already disconnected */
+      }
+      try {
+        mute?.disconnect()
+      } catch {
+        /* already disconnected */
+      }
+    }
+  }
+
+  function releasePrepared() {
+    if (phase === 'recording' || phase === 'paused' || phase === 'stopping') return false
+    warmGeneration += 1
+    startSerial += 1
+    cancelStart = true
+    releaseStreams()
+    if (phase === 'starting') phase = 'idle'
+    return true
+  }
+
+  async function prepare(audio, options = {}) {
+    if (phase !== 'idle') return { prepared: false, busy: true }
+    if (!navigator.mediaDevices?.getUserMedia) throw unsupportedError()
+    primeVoiceContext()
+    const status = await ensureInput(audio, deviceKey(audio, options))
+    if (status !== 'ready' && status !== 'reused') return { prepared: false, stale: true }
+    return { prepared: true, reused: status === 'reused' }
   }
 
   function elapsedMs() {
@@ -400,67 +628,64 @@ export function createCapture({ onError, onStopped } = {}) {
     if (phase === 'starting') cancelStart = true
   }
 
-  async function start(audio, { voiceEnhance = true } = {}) {
+  function startStillOwns(serial) {
+    return serial === startSerial && phase === 'starting' && !cancelStart
+  }
+
+  async function start(audio, options = {}) {
     if (phase !== 'idle') return { started: false }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') throw unsupportedError()
     const mime = pickMimeType()
     if (mime === null) throw unsupportedError()
+    const serial = ++startSerial
     phase = 'starting'
     cancelStart = false
     accumulated = 0
     chunks = []
     mimeType = ''
     extension = 'webm'
-    // Open the voice context in this turn so a click can start it.
-    if (voiceEnhance) voiceCtx = createVoiceContext()
-    let opened = null
+    // Voice enhance is always on. Resume in this turn so the click can unlock the context.
+    primeVoiceContext()
     try {
-      const constraints = cleanMicConstraints(audio)
-      opened = await navigator.mediaDevices.getUserMedia({ audio: constraints })
-      if (cancelStart || phase !== 'starting') return { started: false, cancelled: true }
-      inputStream = opened
-      opened = null
-      let recordStream = inputStream
-      if (voiceCtx) {
-        try {
-          voiceGraph = buildVoiceGraph(voiceCtx, inputStream)
-          recordStream = voiceGraph.stream
-          if (voiceCtx.state === 'suspended') await voiceCtx.resume()
-        } catch {
-          closeVoice()
-          recordStream = inputStream
-        }
+      const status = await ensureInput(audio, deviceKey(audio, options))
+      if (!startStillOwns(serial) || (status !== 'ready' && status !== 'reused')) {
+        return { started: false, cancelled: true }
       }
-      if (cancelStart || phase !== 'starting') return { started: false, cancelled: true }
+      await waitForLeadingSignal()
+      if (!startStillOwns(serial)) return { started: false, cancelled: true }
       const recorderOptions = { audioBitsPerSecond: AUDIO_BITS_PER_SECOND }
       if (mime) recorderOptions.mimeType = mime
-      recorder = new MediaRecorder(recordStream, recorderOptions)
-      stream = recordStream
-      mimeType = recorder.mimeType || mime || 'audio/webm'
+      const rec = new MediaRecorder(stream, recorderOptions)
+      recorder = rec
+      mimeType = rec.mimeType || mime || 'audio/webm'
       extension = extensionForMime(mimeType)
-      recorder.addEventListener('dataavailable', (event) => {
-        if (phase === 'idle') return
+      rec.addEventListener('dataavailable', (event) => {
+        if (recorder !== rec || phase === 'idle') return
         if (event.data && event.data.size > 0) chunks.push(event.data)
       })
-      recorder.addEventListener('error', () => {
+      rec.addEventListener('error', () => {
+        if (recorder !== rec) return
         if (phase === 'recording' || phase === 'paused') onError?.()
       })
-      for (const track of inputStream.getTracks()) {
-        track.addEventListener('ended', () => {
-          if (phase === 'recording' || phase === 'paused') onError?.()
-        })
-      }
-      recorder.start(RECORDER_TIMESLICE_MS)
+      watchInputTracks()
+      if (!startStillOwns(serial)) return { started: false, cancelled: true }
+      rec.start(RECORDER_TIMESLICE_MS)
       segmentStart = performance.now()
       phase = 'recording'
       return { started: true, mimeType, extension }
     } catch (error) {
-      if (phase === 'starting') phase = 'idle'
+      if (serial === startSerial && phase === 'starting') phase = 'idle'
       throw error
     } finally {
+      if (serial !== startSerial) return
       if (phase !== 'recording') {
-        stopTracks(opened)
-        releaseStreams()
+        if (recorder && recorder.state !== 'inactive') {
+          try {
+            recorder.stop()
+          } catch {
+            /* already stopped */
+          }
+        }
         recorder = null
         if (phase === 'starting') phase = 'idle'
       }
@@ -509,7 +734,8 @@ export function createCapture({ onError, onStopped } = {}) {
           }
         : null
     try {
-      releaseStreams()
+      // A live mic stays open for the next take. A dead track is dropped.
+      if (!tracksLive(inputStream)) releaseStreams()
     } catch {
       /* the blob is already assembled */
     }
@@ -604,6 +830,8 @@ export function createCapture({ onError, onStopped } = {}) {
     },
     elapsedMs,
     isActive,
+    prepare,
+    releasePrepared,
     start,
     pause,
     resume,
