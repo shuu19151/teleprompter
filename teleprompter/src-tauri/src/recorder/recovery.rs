@@ -2,7 +2,7 @@
 //!
 //! Startup scans `.sessions/` for a take that is still `recording` or
 //! `paused`. The open segment's header is rebuilt from the bytes on disk.
-//! Save concatenates the segments into one WAV take under Documents/Teleprompter
+//! Save encodes the segments to one AAC-LC M4A take under Documents/Teleprompter
 //! and deletes the session only after that file and its sidecar have been
 //! checked. Discard deletes the session folder and does not write a take.
 
@@ -11,14 +11,38 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{Datelike, Timelike};
-use hound::{SampleFormat, WavSpec, WavWriter};
 use serde::Serialize;
 
+use super::m4a;
 use super::session::{
-  duration_ms, is_finished_state, read_session_file, segment_list, write_session_atomic, SessionRecord,
+  SessionRecord, duration_ms, is_finished_state, read_session_file, segment_list,
+  write_session_atomic,
 };
 use super::wav::repair_wav_header;
-use super::{RecorderError, OUTPUT_SAMPLE_RATE};
+use super::{OUTPUT_SAMPLE_RATE, RecorderError, SESSIONS_DIR};
+
+/// Documents/Teleprompter for a session that lives in `.sessions/<id>`.
+/// Tests keep sessions in a scratch folder, so the take goes in `takes/` beside them.
+pub fn takes_dir_for(session_dir: &Path) -> PathBuf {
+  let sessions = session_dir.parent().unwrap_or(session_dir);
+  if sessions.file_name().and_then(|name| name.to_str()) == Some(SESSIONS_DIR) {
+    sessions.parent().unwrap_or(sessions).to_path_buf()
+  } else {
+    sessions.join("takes")
+  }
+}
+
+pub struct SavedTake {
+  pub name: String,
+  pub path: PathBuf,
+  pub bytes: u64,
+  pub duration_ms: u64,
+}
+
+pub fn save_session(directory: &Path, takes_dir: &Path) -> Result<SavedTake, RecorderError> {
+  let record = read_session_file(directory)?;
+  save_take(takes_dir, directory, record)
+}
 
 const SIDECAR_VERSION: u32 = 1;
 const MAX_PEAKS: usize = 400;
@@ -106,7 +130,10 @@ pub fn apply(
       })?;
       Ok(())
     }
-    "save" => save_take(takes_dir, &directory, record),
+    "save" => {
+      save_take(takes_dir, &directory, record)?;
+      Ok(())
+    }
     _ => Err(RecorderError::Session(
       "the recovery action is not save or discard".into(),
     )),
@@ -133,7 +160,11 @@ fn measured_duration(directory: &Path, record: &SessionRecord) -> u64 {
   }
 }
 
-fn save_take(takes_dir: &Path, directory: &Path, mut record: SessionRecord) -> Result<(), RecorderError> {
+fn save_take(
+  takes_dir: &Path,
+  directory: &Path,
+  mut record: SessionRecord,
+) -> Result<SavedTake, RecorderError> {
   fs::create_dir_all(takes_dir).map_err(|error| {
     RecorderError::Session(format!("could not create {}: {error}", takes_dir.display()))
   })?;
@@ -143,27 +174,36 @@ fn save_take(takes_dir: &Path, directory: &Path, mut record: SessionRecord) -> R
       "that recording has no audio to save".into(),
     ));
   }
+  let (pcm, peaks) = match read_pcm(directory, &names) {
+    Ok(read) => read,
+    Err(error) => return Err(error),
+  };
+  let encoded = match m4a::encode_aac_lc(&pcm) {
+    Ok(encoded) => encoded,
+    Err(error) => return Err(error),
+  };
+  if let Err(error) = m4a::verify_m4a(&encoded, pcm.len() as u64) {
+    return Err(error);
+  }
+  let frames = pcm.len() as u64;
   let stem = take_stem(&record);
   let name = unique_take_name(takes_dir, &stem)?;
   let partial = takes_dir.join(format!(".{name}.partial"));
-  let saved = match write_concat(directory, &names, &partial) {
-    Ok(saved) => saved,
-    Err(error) => {
-      let _ = fs::remove_file(&partial);
-      return Err(error);
-    }
-  };
-  if let Err(error) = verify_wav(&partial, saved.frames) {
+  if let Err(error) = write_bytes(&partial, &encoded) {
+    let _ = fs::remove_file(&partial);
+    return Err(error);
+  }
+  if let Err(error) = verify_saved(&partial, frames) {
     let _ = fs::remove_file(&partial);
     return Err(error);
   }
   let sidecar = TakeSidecar {
     version: SIDECAR_VERSION,
     text_key: record.text_key.clone(),
-    duration_ms: duration_ms(saved.frames),
+    duration_ms: duration_ms(frames),
     created_at: started_millis(&record.started_at),
-    peaks: saved.peaks,
-    mime: "audio/wav".into(),
+    peaks,
+    mime: "audio/mp4".into(),
   };
   let sidecar_partial = takes_dir.join(format!(".{stem}.json.partial"));
   if let Err(error) = write_sidecar(&sidecar_partial, &sidecar) {
@@ -189,15 +229,18 @@ fn save_take(takes_dir: &Path, directory: &Path, mut record: SessionRecord) -> R
       sidecar_path.display()
     )));
   }
-  verify_wav(&audio_path, saved.frames)?;
+  verify_saved(&audio_path, frames)?;
   if !sidecar_path.is_file() {
     return Err(RecorderError::Write(format!(
       "could not save {}",
       sidecar_path.display()
     )));
   }
+  let bytes = fs::metadata(&audio_path)
+    .map(|meta| meta.len())
+    .unwrap_or(0);
   record.state = "finished".into();
-  record.last_written_ms = duration_ms(saved.frames);
+  record.last_written_ms = duration_ms(frames);
   write_session_atomic(directory, &record)?;
   fs::remove_dir_all(directory).map_err(|error| {
     RecorderError::Session(format!(
@@ -205,25 +248,16 @@ fn save_take(takes_dir: &Path, directory: &Path, mut record: SessionRecord) -> R
       directory.display()
     ))
   })?;
-  Ok(())
+  Ok(SavedTake {
+    name,
+    path: audio_path,
+    bytes,
+    duration_ms: duration_ms(frames),
+  })
 }
 
-struct SavedAudio {
-  frames: u64,
-  peaks: Vec<f32>,
-}
-
-fn write_concat(directory: &Path, names: &[String], dest: &Path) -> Result<SavedAudio, RecorderError> {
-  let spec = WavSpec {
-    channels: 1,
-    sample_rate: OUTPUT_SAMPLE_RATE,
-    bits_per_sample: 16,
-    sample_format: SampleFormat::Int,
-  };
-  let mut writer = WavWriter::create(dest, spec).map_err(|error| {
-    RecorderError::Write(format!("could not create {}: {error}", dest.display()))
-  })?;
-  let mut frames = 0u64;
+fn read_pcm(directory: &Path, names: &[String]) -> Result<(Vec<i16>, Vec<f32>), RecorderError> {
+  let mut pcm = Vec::new();
   let mut peaks = PeakFold::default();
   for name in names {
     let path = directory.join(name);
@@ -246,65 +280,41 @@ fn write_concat(directory: &Path, names: &[String], dest: &Path) -> Result<Saved
     }
     for sample in reader.samples::<i16>() {
       let sample = sample.map_err(|error| RecorderError::Write(error.to_string()))?;
-      writer
-        .write_sample(sample)
-        .map_err(|error| RecorderError::Write(error.to_string()))?;
       peaks.push(sample);
-      frames += 1;
+      pcm.push(sample);
     }
   }
-  writer
-    .finalize()
-    .map_err(|error| RecorderError::Write(error.to_string()))?;
-  Ok(SavedAudio {
-    frames,
-    peaks: peaks.finish(),
-  })
+  if pcm.is_empty() {
+    return Err(RecorderError::Session(
+      "that recording has no audio to save".into(),
+    ));
+  }
+  Ok((pcm, peaks.finish()))
 }
 
-fn verify_wav(path: &Path, frames: u64) -> Result<(), RecorderError> {
-  let mut reader = hound::WavReader::open(path).map_err(|error| {
-    RecorderError::Write(format!("could not read {}: {error}", path.display()))
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), RecorderError> {
+  let mut file = File::create(path).map_err(|error| {
+    RecorderError::Write(format!("could not create {}: {error}", path.display()))
   })?;
-  let spec = reader.spec();
-  if spec.channels != 1 || spec.sample_rate != OUTPUT_SAMPLE_RATE || spec.bits_per_sample != 16 {
-    return Err(RecorderError::Write(format!(
-      "{} is not 48 kHz mono 16-bit audio",
-      path.display()
-    )));
-  }
-  if u64::from(reader.duration()) != frames {
-    return Err(RecorderError::Write(format!(
-      "{} does not have the recorded length",
-      path.display()
-    )));
-  }
-  let mut count = 0u64;
-  for sample in reader.samples::<i16>() {
-    sample.map_err(|error| RecorderError::Write(error.to_string()))?;
-    count += 1;
-  }
-  if count != frames {
-    return Err(RecorderError::Write(format!(
-      "{} could not be read back",
-      path.display()
-    )));
-  }
-  let bytes = fs::metadata(path)
-    .map(|meta| meta.len())
-    .unwrap_or(0);
-  if bytes < 44 + frames.saturating_mul(2) {
-    return Err(RecorderError::Write(format!(
-      "{} is shorter than the audio it claims",
-      path.display()
-    )));
-  }
+  file
+    .write_all(bytes)
+    .map_err(|error| RecorderError::Write(error.to_string()))?;
+  file
+    .sync_all()
+    .map_err(|error| RecorderError::Write(error.to_string()))?;
+  Ok(())
+}
+
+fn verify_saved(path: &Path, frames: u64) -> Result<(), RecorderError> {
+  let bytes = fs::read(path)
+    .map_err(|error| RecorderError::Write(format!("could not read {}: {error}", path.display())))?;
+  m4a::verify_m4a(&bytes, frames)?;
   Ok(())
 }
 
 fn write_sidecar(path: &Path, sidecar: &TakeSidecar) -> Result<(), RecorderError> {
-  let bytes = serde_json::to_vec_pretty(sidecar)
-    .map_err(|error| RecorderError::Write(error.to_string()))?;
+  let bytes =
+    serde_json::to_vec_pretty(sidecar).map_err(|error| RecorderError::Write(error.to_string()))?;
   let mut file = File::create(path).map_err(|error| RecorderError::Write(error.to_string()))?;
   file
     .write_all(&bytes)
@@ -312,11 +322,11 @@ fn write_sidecar(path: &Path, sidecar: &TakeSidecar) -> Result<(), RecorderError
   file
     .sync_all()
     .map_err(|error| RecorderError::Write(error.to_string()))?;
-  let read: serde_json::Value = serde_json::from_slice(&fs::read(path).map_err(|error| {
-    RecorderError::Write(error.to_string())
-  })?)
+  let read: serde_json::Value = serde_json::from_slice(
+    &fs::read(path).map_err(|error| RecorderError::Write(error.to_string()))?,
+  )
   .map_err(|error| RecorderError::Write(error.to_string()))?;
-  if read["textKey"] != sidecar.text_key || read["mime"] != "audio/wav" {
+  if read["textKey"] != sidecar.text_key || read["mime"] != sidecar.mime {
     return Err(RecorderError::Write(format!(
       "could not read back {}",
       path.display()
@@ -331,11 +341,15 @@ fn session_dir(root: &Path, session_id: &str) -> Result<PathBuf, RecorderError> 
     || session_id.starts_with('.')
     || session_id.contains(['/', '\\', '.', '\0'])
   {
-    return Err(RecorderError::Session("that recording was not found".into()));
+    return Err(RecorderError::Session(
+      "that recording was not found".into(),
+    ));
   }
   let path = root.join(session_id);
   if path.parent() != Some(root) || !path.is_dir() {
-    return Err(RecorderError::Session("that recording was not found".into()));
+    return Err(RecorderError::Session(
+      "that recording was not found".into(),
+    ));
   }
   Ok(path)
 }
@@ -413,12 +427,12 @@ fn started_millis(started_at: &str) -> i64 {
 }
 
 fn unique_take_name(dir: &Path, stem: &str) -> Result<String, RecorderError> {
-  let first = format!("{stem}.wav");
+  let first = format!("{stem}.m4a");
   if !dir.join(&first).exists() {
     return Ok(first);
   }
   for index in 2..1000 {
-    let name = format!("{stem}-{index}.wav");
+    let name = format!("{stem}-{index}.m4a");
     if !dir.join(&name).exists() {
       return Ok(name);
     }
@@ -472,10 +486,7 @@ fn downsample(peaks: &[f32], max: usize) -> Vec<f32> {
   for index in 0..max {
     let start = index * peaks.len() / max;
     let end = ((index + 1) * peaks.len() / max).max(start + 1);
-    let peak = peaks[start..end]
-      .iter()
-      .copied()
-      .fold(0.0f32, f32::max);
+    let peak = peaks[start..end].iter().copied().fold(0.0f32, f32::max);
     out.push(peak.clamp(0.0, 1.0));
   }
   out
@@ -483,7 +494,10 @@ fn downsample(peaks: &[f32], max: usize) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-  use super::super::session::{self, duration_ms, write_session_atomic, SessionRecord};
+  use hound::{SampleFormat, WavSpec, WavWriter};
+
+  use super::super::m4a;
+  use super::super::session::{self, SessionRecord, duration_ms, write_session_atomic};
   use super::super::wav::f32_to_i16;
   use super::*;
 
@@ -543,45 +557,37 @@ mod tests {
       .collect();
     let audio = saved
       .iter()
-      .find(|name| name.ends_with(".wav"))
-      .expect("saved wav");
+      .find(|name| name.ends_with(".m4a"))
+      .expect("saved m4a");
     assert!(audio.starts_with("E01-how-i-stay-productive-and-calm-"));
-    assert!(audio.ends_with(".wav"));
-    let sidecar_name = format!("{}.json", audio.trim_end_matches(".wav"));
+    assert!(audio.ends_with(".m4a"));
+    let sidecar_name = format!("{}.json", audio.trim_end_matches(".m4a"));
     assert!(saved.iter().any(|name| name == &sidecar_name));
-    let mut reader = hound::WavReader::open(takes.join(audio)).unwrap();
-    assert_eq!(reader.spec().sample_rate, OUTPUT_SAMPLE_RATE);
-    assert_eq!(reader.spec().channels, 1);
-    assert_eq!(reader.spec().bits_per_sample, 16);
-    let pcm: Vec<i16> = reader.samples::<i16>().map(|sample| sample.unwrap()).collect();
-    let mut expected = Vec::new();
-    expected.extend(first.iter().copied().map(f32_to_i16));
-    expected.extend(second.iter().copied().map(f32_to_i16));
-    expected.extend(third.iter().copied().map(f32_to_i16));
-    assert_eq!(pcm, expected);
+    let recorded = (first.len() + second.len() + third.len()) as u64;
+    let bytes = fs::read(takes.join(audio)).unwrap();
+    let info = m4a::verify_m4a(&bytes, recorded).unwrap();
+    assert_eq!(info.major_brand, *b"M4A ");
+    assert!(info.faststart);
+    assert_eq!(info.audio_object_type, 2);
+    assert_eq!(info.sample_rate, OUTPUT_SAMPLE_RATE);
+    assert_eq!(info.channels, 1);
     let sidecar: serde_json::Value =
       serde_json::from_slice(&fs::read(takes.join(&sidecar_name)).unwrap()).unwrap();
     assert_eq!(sidecar["version"], 1);
     assert_eq!(sidecar["textKey"], "E01");
-    assert_eq!(sidecar["mime"], "audio/wav");
-    assert_eq!(sidecar["durationMs"], duration_ms(expected.len() as u64));
+    assert_eq!(sidecar["mime"], "audio/mp4");
+    assert_eq!(sidecar["durationMs"], duration_ms(recorded));
     assert!(sidecar["createdAt"].as_i64().unwrap() > 0);
     assert!(sidecar["peaks"].as_array().unwrap().len() >= 1);
 
     apply(root.sessions(), takes, discard_id, "discard").unwrap();
     assert!(!root.sessions().join(discard_id).exists());
-    let wavs = fs::read_dir(takes)
+    let m4as = fs::read_dir(takes)
       .unwrap()
       .filter_map(|entry| entry.ok())
-      .filter(|entry| {
-        entry
-          .path()
-          .extension()
-          .and_then(|ext| ext.to_str())
-          == Some("wav")
-      })
+      .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("m4a"))
       .count();
-    assert_eq!(wavs, 1);
+    assert_eq!(m4as, 1);
     assert!(scan_unfinished(root.sessions()).unwrap().is_empty());
   }
 
@@ -627,12 +633,11 @@ mod tests {
     );
     let record = read_session_file(&root.sessions().join(id)).unwrap();
     let stem = take_stem(&record);
-    fs::write(root.takes().join(format!("{stem}.wav")), b"taken").unwrap();
+    fs::write(root.takes().join(format!("{stem}.m4a")), b"taken").unwrap();
     apply(root.sessions(), root.takes(), id, "save").unwrap();
-    let suffixed = root.takes().join(format!("{stem}-2.wav"));
+    let suffixed = root.takes().join(format!("{stem}-2.m4a"));
     assert!(suffixed.is_file());
-    let reader = hound::WavReader::open(&suffixed).unwrap();
-    assert_eq!(reader.duration(), 2);
+    m4a::verify_m4a(&fs::read(&suffixed).unwrap(), 2).unwrap();
     assert!(root.takes().join(format!("{stem}-2.json")).is_file());
   }
 

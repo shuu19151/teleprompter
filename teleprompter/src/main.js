@@ -16,7 +16,7 @@ import { createReaderController } from './reading/reader-controller.js'
 import { createReaderLayout } from './reading/reader-layout.js'
 import { createReaderProgress } from './reading/reader-progress.js'
 import { createReaderView } from './reading/reader-view.js'
-import { hasTauriGlobal, readNativeRecorderEnabled, selectRecorderBackend } from './recording/recorder-backend.js'
+import { hasTauriGlobal, selectRecorderBackend } from './recording/recorder-backend.js'
 import { recoverUnfinishedRecordings } from './recording/recorder-recovery.js'
 import { createRecorder } from './recording/recorder-ui.js'
 import { mountApp } from './shell/app-shell.js'
@@ -32,18 +32,10 @@ const bundledEssays = loadBundledEssays()
 
 const confirmDialog = createConfirmDialog()
 
-function startupStorage() {
-  try {
-    return globalThis.localStorage
-  } catch {
-    return null
-  }
-}
-
-// Read once. A later write to tp.nativeRecorder does nothing until the next load.
+// The desktop window always records natively. The Vite page keeps MediaRecorder
+// so the Playwright smoke test can run without a microphone device from cpal.
 const recorderKind = selectRecorderBackend({
   hasTauri: hasTauriGlobal(globalThis.window),
-  nativeEnabled: readNativeRecorderEnabled(startupStorage()),
 })
 
 const recorder = createRecorder({

@@ -2,37 +2,20 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   NATIVE_PEAK_STEP_MS,
-  NATIVE_RECORDER_KEY,
   createNativeCapture,
   createRecorderBackend,
   hasTauriGlobal,
   nativeStartError,
   parseRecorderError,
-  readNativeRecorderEnabled,
   selectRecorderBackend,
 } from '../src/recording/recorder-backend.js'
 
-test('native recorder stays off unless Tauri and the startup flag are both set', () => {
-  assert.equal(NATIVE_RECORDER_KEY, 'tp.nativeRecorder')
+test('the desktop window records natively and the Vite page stays on MediaRecorder', () => {
   assert.equal(NATIVE_PEAK_STEP_MS, 20)
-  const enabled = { getItem: (key) => (key === NATIVE_RECORDER_KEY ? '1' : null) }
-  assert.equal(readNativeRecorderEnabled(enabled), true)
-  assert.equal(readNativeRecorderEnabled({ getItem: () => '0' }), false)
-  assert.equal(readNativeRecorderEnabled({ getItem: () => null }), false)
-  assert.equal(readNativeRecorderEnabled(null), false)
-  assert.equal(
-    readNativeRecorderEnabled({
-      getItem() {
-        throw new Error('storage blocked')
-      },
-    }),
-    false,
-  )
-
-  assert.equal(selectRecorderBackend({ hasTauri: true, nativeEnabled: true }), 'native')
-  assert.equal(selectRecorderBackend({ hasTauri: true, nativeEnabled: false }), 'web')
+  assert.equal(selectRecorderBackend({ hasTauri: true }), 'native')
+  assert.equal(selectRecorderBackend({ hasTauri: true, nativeEnabled: false }), 'native')
   assert.equal(selectRecorderBackend({ hasTauri: false, nativeEnabled: true }), 'web')
-  assert.equal(selectRecorderBackend({ hasTauri: false, nativeEnabled: false }), 'web')
+  assert.equal(selectRecorderBackend({ hasTauri: false }), 'web')
 })
 
 test('the Tauri check reads window.__TAURI__', () => {
@@ -66,7 +49,7 @@ test('a native start error keeps the microphone messages the page already shows'
   assert.equal(nativeStartError('nope').name, 'AbortError')
 })
 
-test('the native backend feeds the waveform and does not build an m4a blob', async () => {
+test('the native backend feeds the waveform and reports the saved m4a', async () => {
   const peaks = []
   const meters = []
   let armed = null
@@ -107,11 +90,13 @@ test('the native backend feeds the waveform and does not build an m4a blob', asy
         async stop() {
           handlers.onPeaks({ startIndex: 2, values: [0.5] })
           return {
-            path: 'C:\\Users\\a\\Documents\\Teleprompter\\.sessions\\sess-1\\take.wav',
+            path: 'C:\\Users\\a\\Documents\\Teleprompter\\.sessions\\sess-1\\seg-000.wav',
             durationMs: 1000,
             bytes: 50,
             droppedSamples: 0,
             peaks: [0.2, 0.4, 0.5],
+            takePath: 'C:\\Users\\a\\Documents\\Teleprompter\\E01-note-20261123-1804.m4a',
+            takeName: 'E01-note-20261123-1804.m4a',
           }
         },
         async cancel() {},
@@ -128,7 +113,7 @@ test('the native backend feeds the waveform and does not build an m4a blob', asy
   assert.equal(backend.resume(), false)
   const started = await backend.start()
   assert.equal(started.started, true)
-  assert.equal(started.extension, 'wav')
+  assert.equal(started.extension, 'm4a')
   assert.equal(backend.phase, 'recording')
   assert.equal(armed, 20)
   assert.deepEqual(peaks, [{ startIndex: 0, values: [0.2, 0.4] }])
@@ -147,13 +132,14 @@ test('the native backend feeds the waveform and does not build an m4a blob', asy
   } finally {
     console.info = original
   }
-  assert.equal(stopped, null)
+  assert.equal(stopped.savedToDisk, true)
+  assert.equal(stopped.name, 'E01-note-20261123-1804.m4a')
+  assert.equal(stopped.mimeType, 'audio/mp4')
   assert.equal(backend.phase, 'idle')
   assert.equal(backend.isActive(), false)
   assert.equal(disarmed, 1)
   assert.equal(peaks.length, 2)
-  assert.match(logs.join('\n'), /take\.wav/)
-  assert.match(logs.join('\n'), /3 peaks/)
+  assert.match(logs.join('\n'), /E01-note-20261123-1804\.m4a/)
   assert.equal(stoppedTake.peaks.length, 3)
 })
 

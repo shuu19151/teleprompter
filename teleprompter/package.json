@@ -2,6 +2,9 @@
   "name": "teleprompter",
   "private": true,
   "type": "module",
+  "imports": {
+    "#web-capture": "./src/recording/web-capture.js"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

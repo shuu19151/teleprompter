@@ -173,6 +173,33 @@ export function createRecorderController({ microphone, ui, wave, takes, store, d
   async function commitTake(meta, result) {
     microphone.closeAudioGraph()
     ui.syncRecUi()
+    if (result?.failed) {
+      ui.showRecMessage(inTauri() ? DISK_TAKE_MESSAGE : SAVE_TAKE_MESSAGE)
+      leaveRecordingPanel()
+      return null
+    }
+    if (result?.savedToDisk) {
+      try {
+        await takes.renderTakes()
+        const rows = await store.list()
+        const saved = rows.find(
+          (row) =>
+            (result.name && row.name === result.name) ||
+            (result.diskPath && row.diskPath === result.diskPath),
+        )
+        const sameText = takeTextKey(deps.current()) === meta?.textKey
+        if (saved && sameText && openAfterSave) {
+          const blob = await store.readBlob(saved)
+          await openPlayback({ ...saved, blob })
+        } else leaveRecordingPanel()
+        if (saved) ui.noteTakeSaved()
+        return saved || null
+      } catch {
+        ui.showRecMessage(inTauri() ? DISK_TAKE_MESSAGE : SAVE_TAKE_MESSAGE)
+        leaveRecordingPanel()
+        return null
+      }
+    }
     if (!result?.blob?.size || !meta?.textKey) {
       leaveRecordingPanel()
       return null

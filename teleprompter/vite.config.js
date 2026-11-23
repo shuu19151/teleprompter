@@ -29,9 +29,17 @@ function essaysApi() {
 }
 
 const devHost = process.env.TAURI_DEV_HOST
+const tauriBundle = Boolean(process.env.TAURI_ENV_PLATFORM)
 
 export default defineConfig({
   plugins: [essaysApi()],
+  resolve: tauriBundle
+    ? {
+        alias: {
+          '#web-capture': path.resolve(root, 'src/recording/web-capture-stub.js'),
+        },
+      }
+    : undefined,
   clearScreen: false,
   envPrefix: ['VITE_', 'TAURI_ENV_*'],
   server: {
