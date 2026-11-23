@@ -1,10 +1,10 @@
 /**
  * Takes for the open text: render the list, play a row, and delete it.
- * A Tauri take that was saved to Documents can be shown in the folder.
+ * The list is the Documents folder in the Tauri window. A row can be shown
+ * in that folder. Deleting the row removes the audio file and its sidecar.
  */
 import { inTauri } from '../library/essay-folder.js'
 import { elementFromEvent, openRowMenu } from '../shared/row-menu.js'
-import { listTakes, removeTake } from './recording.js'
 import {
   chooseTakes,
   formatTakeDuration,
@@ -12,10 +12,15 @@ import {
   takeDateIso,
   takeTextKey,
 } from './recorder-math.js'
-import { DELETE_TAKE_MESSAGE, SHOW_TAKE_MESSAGE } from './rec-messages.js'
+import { DELETE_TAKE_MESSAGE, PLAY_TAKE_MESSAGE, SHOW_TAKE_MESSAGE } from './rec-messages.js'
 import { revealTakeFile } from './take-disk.js'
 
+function sameTake(left, right) {
+  return left != null && right != null && String(left) === String(right)
+}
+
 export function createTakeList({
+  store,
   getPanelMode,
   getPlayback,
   isRecordingActive,
@@ -32,7 +37,7 @@ export function createTakeList({
     const playback = getPlayback()
     const id = getPanelMode() === 'playback' ? playback?.take?.id : null
     for (const row of document.querySelectorAll('#takes-list [data-take-id]')) {
-      const on = id != null && row.dataset.takeId === String(id)
+      const on = sameTake(id, row.dataset.takeId)
       row.classList.toggle('is-on', on)
       const select = row.querySelector('.take-select')
       if (!select) continue
@@ -47,9 +52,9 @@ export function createTakeList({
     const iso = takeDateIso(take.createdAt)
     const duration = formatTakeDuration(take.durationMs)
     const playback = getPlayback()
-    const on = getPanelMode() === 'playback' && playback?.take?.id === take.id
+    const on = getPanelMode() === 'playback' && sameTake(playback?.take?.id, take.id)
     return `
-    <li class="take-row ${on ? 'is-on' : ''}" data-take-id="${take.id}">
+    <li class="take-row ${on ? 'is-on' : ''}" data-take-id="${deps.escapeAttr(String(take.id))}">
       <button class="take-select" type="button" aria-pressed="${on ? 'true' : 'false'}" ${on ? 'aria-current="true"' : ''} aria-label="Play take from ${deps.escapeAttr(when)}, ${deps.escapeAttr(duration)}">
         <span class="take-meta">
           <time${iso ? ` datetime="${deps.escapeAttr(iso)}"` : ''}>${deps.escapeHtml(when)}</time>
@@ -66,7 +71,7 @@ export function createTakeList({
     const token = ++takesToken
     let rows = []
     try {
-      rows = key ? await listTakes(key) : []
+      rows = key ? await store.list() : []
     } catch {
       if (token !== takesToken || !list.isConnected) return
       shownTakes = []
@@ -77,6 +82,10 @@ export function createTakeList({
     try {
       rows = chooseTakes(rows, deps.current())
       shownTakes = rows
+      const playback = getPlayback()
+      if (playback?.take && playback.take.textKey === key && !rows.some((row) => sameTake(row.id, playback.take.id))) {
+        closeRecorderPanel()
+      }
       if (!rows.length) {
         list.innerHTML = '<li class="empty">No takes yet.</li>'
         return
@@ -91,7 +100,7 @@ export function createTakeList({
   }
 
   async function deleteShownTake(id) {
-    const take = shownTakes.find((item) => item.id === id)
+    const take = shownTakes.find((item) => sameTake(item.id, id))
     if (!take) return
     const when = formatTakeWhen(take.createdAt)
     const duration = formatTakeDuration(take.durationMs)
@@ -101,32 +110,41 @@ export function createTakeList({
     })
     if (!accepted) return
     try {
-      await removeTake(id)
+      await store.remove(id)
     } catch {
       deps.showNotice(DELETE_TAKE_MESSAGE)
       return
     }
-    if (getPlayback()?.take?.id === id) closeRecorderPanel()
+    if (sameTake(getPlayback()?.take?.id, id)) closeRecorderPanel()
     await renderTakes()
   }
 
   async function playShownTake(id) {
-    const take = shownTakes.find((item) => item.id === id)
+    const take = shownTakes.find((item) => sameTake(item.id, id))
     if (!take) return
     const playback = getPlayback()
-    if (getPanelMode() === 'playback' && playback?.take?.id === id) {
+    if (getPanelMode() === 'playback' && sameTake(playback?.take?.id, id)) {
       if (playback.audio?.paused || playback.audio?.ended) togglePlayback()
       return
     }
     if (isRecordingActive()) await stopRecordingAndSave({ openAfter: false })
-    const fresh = shownTakes.find((item) => item.id === id) || take
-    await openPlayback(fresh)
+    const fresh = shownTakes.find((item) => sameTake(item.id, id)) || take
+    let playing = fresh
+    if (!playing.blob) {
+      try {
+        playing = { ...playing, blob: await store.readBlob(playing) }
+      } catch {
+        deps.showNotice(PLAY_TAKE_MESSAGE)
+        return
+      }
+    }
+    await openPlayback(playing)
   }
 
   function takeFromRow(row) {
-    const id = Number(row?.dataset.takeId)
-    if (!Number.isInteger(id)) return null
-    return shownTakes.find((item) => item.id === id) || null
+    const id = row?.dataset.takeId
+    if (!id) return null
+    return shownTakes.find((item) => sameTake(item.id, id)) || null
   }
 
   function openTakeMenu(row, x, y, returnFocus) {
@@ -178,9 +196,30 @@ export function createTakeList({
   function onTakesClick(event) {
     const row = event.target.closest('.take-row')
     if (!row) return
-    const id = Number(row.dataset.takeId)
-    if (Number.isInteger(id)) void playShownTake(id)
+    const id = row.dataset.takeId
+    if (id) void playShownTake(id)
   }
+
+  function bindExternalChanges() {
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', () => {
+        void renderTakes()
+      })
+    }
+    if (!inTauri()) return
+    import('@tauri-apps/api/event')
+      .then(({ listen }) => listen('takes://changed', () => void renderTakes()))
+      .catch(() => {})
+    import('@tauri-apps/api/window')
+      .then(({ getCurrentWindow }) =>
+        getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+          if (focused) void renderTakes()
+        }),
+      )
+      .catch(() => {})
+  }
+
+  bindExternalChanges()
 
   return {
     markActiveTake,

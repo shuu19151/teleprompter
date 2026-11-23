@@ -214,7 +214,7 @@ async function start() {
   }
   await library.bootFolder()
   library.restoreEssay()
-  recorder.warmStore()
+  await recorder.warmStore()
   layout.syncScriptSize()
   mountApp({
     query: library.query,

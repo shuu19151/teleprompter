@@ -4,11 +4,11 @@
  */
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { warmRecordingStore } from './recording.js'
 import { createMicrophoneController } from './microphone-controller.js'
 import { createRecorderController } from './recorder-controller.js'
 import { createRecorderView } from './recorder-view.js'
 import { createTakeList } from './take-list.js'
+import { createTakesStore } from './takes-store.js'
 import { createWaveformView } from './waveform-view.js'
 
 export function createRecorder(deps) {
@@ -48,7 +48,10 @@ export function createRecorder(deps) {
     getPlayback: () => recorder.getPlayback(),
   })
 
+  const store = createTakesStore()
+
   const takes = createTakeList({
+    store,
     getPanelMode: () => recorder.getMode(),
     getPlayback: () => recorder.getPlayback(),
     isRecordingActive: () => recorder.recordingActive(),
@@ -64,6 +67,7 @@ export function createRecorder(deps) {
     ui,
     wave,
     takes,
+    store,
     deps,
     recorderKind: deps.recorderKind,
   })
@@ -168,7 +172,7 @@ export function createRecorder(deps) {
       return ui.recorderPanelHtml()
     },
     warmStore() {
-      void warmRecordingStore()
+      return store.start()
     },
     watchAudioInputs() {
       if (deps.recorderKind === 'native') {

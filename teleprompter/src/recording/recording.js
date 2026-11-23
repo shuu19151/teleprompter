@@ -222,6 +222,23 @@ export function warmRecordingStore() {
   return openDb().catch(() => null)
 }
 
+export function listAllTakes() {
+  return openDb().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(DB_STORE, 'readonly')
+        const request = tx.objectStore(DB_STORE).getAll()
+        request.onsuccess = () => resolve(request.result || [])
+        request.onerror = () => reject(request.error || tx.error)
+        tx.onerror = () => reject(tx.error || request.error)
+        tx.onabort = () => {
+          rejectClosed(tx.error)
+          reject(tx.error || new Error('Could not read takes'))
+        }
+      }),
+  )
+}
+
 export function listTakes(textKey) {
   return openDb().then(
     (db) =>
