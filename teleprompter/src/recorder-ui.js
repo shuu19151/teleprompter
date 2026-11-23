@@ -2,7 +2,6 @@ import {
   addTake,
   createCapture,
   describeMediaError,
-  formatClock,
   formatFine,
   isQuotaError as isIdbQuotaError,
   listTakes,
@@ -11,6 +10,30 @@ import {
   sampleLevel,
   waveformPeaks,
 } from './recording.js'
+import {
+  WAVE_STEP_MS,
+  barHeight,
+  chooseTakes,
+  formatTakeDuration,
+  formatTakeWhen,
+  micControlState,
+  panelChromeState,
+  playbackClockText,
+  playbackNowSec,
+  playbackRatio,
+  playbackSampleWindow,
+  recControlState,
+  recordingSampleWindow,
+  rulerMark,
+  rulerWindow,
+  storedTake,
+  takeDateIso,
+  takeMeta as buildTakeMeta,
+  takeTextKey,
+  timeAtPointer,
+  timelineScale,
+  waveX,
+} from './recorder-math.js'
 import { inTauri } from './essay-folder.js'
 import { elementFromEvent, openRowMenu } from './row-menu.js'
 import { revealTakeFile, saveTakeToDocuments } from './take-disk.js'
@@ -23,10 +46,6 @@ const QUOTA_TAKE_MESSAGE = 'Could not save this take because browser storage is 
 const SAVE_TAKE_MESSAGE = 'Could not save this take.'
 const DISK_TAKE_MESSAGE = 'Could not save the take to Documents.'
 const DELETE_TAKE_MESSAGE = 'Could not delete this take.'
-const WAVE_STEP_MS = 40
-const RULER_STEP_MS = 400
-const RULER_MAJOR_EVERY = 4
-const RULER_SIDE_MAJORS = 4.5
 const STOP_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="1.5" fill="currentColor"/></svg>`
 const PAUSE_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></svg>`
 const PLAY_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5.2v13.6l11-6.8z"/></svg>`
@@ -115,17 +134,8 @@ export function syncRecorderToRun() {
   syncRecUi()
 }
 
-function takeTextKey(item) {
-  if (!item) return ''
-  return item.kind === 'import' ? item.id : item.code
-}
-
 function takeMeta() {
-  const item = bridge.current()
-  if (!item) return null
-  const textKey = takeTextKey(item)
-  if (!textKey) return null
-  return { textKey, code: item.code || 'take', title: item.title || 'Untitled' }
+  return buildTakeMeta(bridge.current())
 }
 
 export function showRecMessage(message) {
@@ -137,32 +147,14 @@ export function showRecMessage(message) {
 }
 
 export function syncRecUi() {
-  const live = capture.phase === 'recording' || capture.phase === 'paused'
-  const paused = capture.phase === 'paused'
-  const label = live ? (paused ? 'Stop recording, paused' : 'Stop recording') : 'Start recording'
+  const view = recControlState(capture.phase)
   for (const button of document.querySelectorAll('#rec, #rec-stage')) {
-    button.setAttribute('aria-pressed', live ? 'true' : 'false')
-    button.classList.toggle('is-recording', live)
-    button.classList.toggle('is-paused', paused)
-    button.setAttribute('aria-label', label)
+    button.setAttribute('aria-pressed', view.pressed)
+    button.classList.toggle('is-recording', view.recording)
+    button.classList.toggle('is-paused', view.paused)
+    button.setAttribute('aria-label', view.label)
   }
   if (panelMode === 'recording') syncPanelChrome()
-}
-
-function formatTakeWhen(ms) {
-  const date = new Date(ms)
-  if (Number.isNaN(date.getTime())) return ''
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
-}
-
-function takeDateIso(ms) {
-  const date = new Date(ms)
-  if (Number.isNaN(date.getTime())) return ''
-  return date.toISOString()
-}
-
-function formatTakeDuration(ms) {
-  return formatClock(ms)
 }
 
 function themeColors() {
@@ -261,17 +253,12 @@ function saveMicId(id) {
   }
 }
 
-function recordingBusy() {
-  return capture.phase === 'starting' || capture.phase === 'recording' || capture.phase === 'paused' || capture.phase === 'stopping'
-}
-
 function syncMicControls() {
   const row = document.querySelector('#mic-row')
-  const panelOpen = panelMode === 'recording' || panelMode === 'playback'
-  if (row) row.hidden = panelOpen
-  const busy = panelMode === 'recording' || recordingBusy()
-  for (const select of document.querySelectorAll('select.mic-select')) select.disabled = busy
-  for (const input of document.querySelectorAll('input.voice-enhance-input')) input.disabled = busy
+  const controls = micControlState({ mode: panelMode, phase: capture.phase })
+  if (row) row.hidden = controls.panelOpen
+  for (const select of document.querySelectorAll('select.mic-select')) select.disabled = controls.busy
+  for (const input of document.querySelectorAll('input.voice-enhance-input')) input.disabled = controls.busy
 }
 
 function micOptions() {
@@ -394,14 +381,6 @@ function exportPeaks() {
   return { peaks, origin }
 }
 
-/** x = centerX + (t - now) * pxPerSec. The same scale is used for the ruler and the wave. */
-function timelineScale(width) {
-  const centerX = width / 2
-  const majorSec = (RULER_STEP_MS * RULER_MAJOR_EVERY) / 1000
-  const pxPerSec = centerX / (RULER_SIDE_MAJORS * majorSec)
-  return { centerX, pxPerSec }
-}
-
 export function resetRulerTrack() {
   rulerBuilt = { key: '', have: new Set() }
   const track = document.querySelector('#recorder-ruler-track')
@@ -427,22 +406,20 @@ function fitCanvas(canvas) {
 }
 
 function addRulerMark(track, index, pxPerSec) {
-  const tMs = index * RULER_STEP_MS
-  const x = (tMs / 1000) * pxPerSec
-  const major = index % RULER_MAJOR_EVERY === 0
+  const mark = rulerMark(index, pxPerSec)
   const tick = document.createElement('span')
-  tick.className = major ? 'ruler-tick major' : 'ruler-tick minor'
+  tick.className = mark.major ? 'ruler-tick major' : 'ruler-tick minor'
   tick.dataset.index = String(index)
-  tick.dataset.ms = String(tMs)
-  tick.style.left = `${x}px`
+  tick.dataset.ms = String(mark.tMs)
+  tick.style.left = `${mark.x}px`
   track.appendChild(tick)
-  if (!major) return
+  if (!mark.major) return
   const label = document.createElement('span')
   label.className = 'ruler-label'
   label.dataset.index = String(index)
-  label.dataset.ms = String(tMs)
-  label.style.left = `${x}px`
-  label.textContent = formatFine(tMs)
+  label.dataset.ms = String(mark.tMs)
+  label.style.left = `${mark.x}px`
+  label.textContent = formatFine(mark.tMs)
   track.appendChild(label)
 }
 
@@ -452,13 +429,9 @@ function addRulerMark(track, index, pxPerSec) {
  */
 function placeRuler(width, centerX, pxPerSec, nowSec) {
   const track = document.querySelector('#recorder-ruler-track')
-  if (!track || width <= 0 || pxPerSec <= 0) return
-  const margin = (RULER_STEP_MS * RULER_MAJOR_EVERY) / 1000
-  const leftTime = Math.max(0, nowSec - centerX / pxPerSec - margin)
-  const rightTime = nowSec + Math.max(0, width - centerX) / pxPerSec + margin
-  const first = Math.max(0, Math.floor((leftTime * 1000) / RULER_STEP_MS))
-  const last = Math.max(first, Math.ceil((rightTime * 1000) / RULER_STEP_MS))
-  const key = `${Math.round(width)}:${Math.round(pxPerSec * 100)}`
+  const marks = rulerWindow(width, centerX, pxPerSec, nowSec)
+  if (!track || !marks) return
+  const { first, last, key } = marks
   if (rulerBuilt.key !== key) {
     track.replaceChildren()
     rulerBuilt = { key, have: new Set() }
@@ -476,21 +449,14 @@ function placeRuler(width, centerX, pxPerSec, nowSec) {
     addRulerMark(track, index, pxPerSec)
     rulerBuilt.have.add(index)
   }
-  const span = Math.max(width, ((last * RULER_STEP_MS) / 1000) * pxPerSec + 64)
-  track.style.width = `${Math.ceil(span)}px`
-  track.style.transform = `translateX(${centerX - nowSec * pxPerSec}px)`
+  track.style.width = `${marks.width}px`
+  track.style.transform = `translateX(${marks.translateX}px)`
 }
 
 function drawBaseline(ctx, width, height, color) {
   const mid = height / 2
   ctx.fillStyle = color
   ctx.fillRect(0, mid - 0.5, width, 1)
-}
-
-function barHeight(level, height) {
-  const shaped = Math.pow(Math.min(1, Math.max(0, level || 0)), 0.75)
-  if (shaped < 0.05) return 0
-  return Math.max(2, shaped * (height - 6))
 }
 
 function drawBar(ctx, x, mid, bar) {
@@ -510,12 +476,16 @@ function drawRecordingWave(canvas, nowSec, centerX, pxPerSec) {
   ctx.clip()
   ctx.fillStyle = colors.wave
   const mid = height / 2
-  const step = WAVE_STEP_MS / 1000
-  const leftTime = nowSec - (centerX + 4) / pxPerSec
-  const first = Math.max(0, peakCount - PEAK_RING_SIZE, Math.floor(leftTime / step))
+  const { first, step } = recordingSampleWindow({
+    peakCount,
+    ringSize: PEAK_RING_SIZE,
+    nowSec,
+    centerX,
+    pxPerSec,
+  })
   for (let i = first; i < peakCount; i += 1) {
     const t = (i + 0.5) * step
-    const x = centerX + (t - nowSec) * pxPerSec
+    const x = waveX(centerX, t, nowSec, pxPerSec)
     if (x < -4) continue
     if (x > centerX) break
     const bar = barHeight(peakAt(i), height)
@@ -537,16 +507,19 @@ function drawPlaybackWave(canvas, peaks, origin, step, nowSec, centerX, pxPerSec
   if (!peaks?.length || !(step > 0) || !(pxPerSec > 0)) return
   ctx.fillStyle = colors.wave
   const mid = height / 2
-  const leftTime = nowSec - (centerX + 4) / pxPerSec
-  const rightTime = nowSec + (width - centerX + 4) / pxPerSec
-  const firstAbs = Math.floor(leftTime / step)
-  const lastAbs = Math.ceil(rightTime / step)
-  const first = Math.max(0, firstAbs - origin)
-  const last = Math.min(peaks.length, lastAbs - origin + 1)
+  const { first, last } = playbackSampleWindow({
+    nowSec,
+    centerX,
+    pxPerSec,
+    width,
+    step,
+    origin,
+    length: peaks.length,
+  })
   for (let i = first; i < last; i += 1) {
     const t = (origin + i + 0.5) * step
     if (t < 0) continue
-    const x = centerX + (t - nowSec) * pxPerSec
+    const x = waveX(centerX, t, nowSec, pxPerSec)
     if (x < -4 || x > width + 4) continue
     const bar = barHeight(peaks[i], height)
     if (bar <= 0) continue
@@ -604,10 +577,10 @@ export function paintPlayback(forcedTime) {
   if (panelMode !== 'playback' || !playback) return
   const duration = playbackDuration()
   const current = forcedTime != null ? forcedTime : playback.audio?.currentTime || 0
-  const nowSec = duration > 0 ? Math.min(duration, Math.max(0, current)) : Math.max(0, current)
-  playback.ratio = duration > 0 ? nowSec / duration : 0
+  const nowSec = playbackNowSec(current, duration)
+  playback.ratio = playbackRatio(nowSec, duration)
   const clock = document.querySelector('#recorder-clock')
-  if (clock) clock.textContent = `${formatFine(nowSec * 1000)} / ${formatFine(duration * 1000)}`
+  if (clock) clock.textContent = playbackClockText(nowSec * 1000, duration * 1000)
   const canvas = document.querySelector('#recorder-wave')
   if (!canvas) return
   const width = canvas.clientWidth
@@ -635,37 +608,34 @@ function stopPlayLoop() {
 function syncPanelChrome() {
   const panel = document.querySelector('#recorder-panel')
   if (!panel) return
-  const open = panelMode === 'recording' || panelMode === 'playback'
-  panel.classList.toggle('is-open', open)
-  panel.dataset.mode = panelMode
-  panel.setAttribute('aria-hidden', open ? 'false' : 'true')
-  if (open) panel.removeAttribute('inert')
+  const playbackPaused = !playback?.audio || playback.audio.paused || playback.audio.ended
+  const view = panelChromeState({ mode: panelMode, phase: capture.phase, playbackPaused })
+  panel.classList.toggle('is-open', view.open)
+  panel.dataset.mode = view.mode
+  panel.setAttribute('aria-hidden', view.hidden)
+  if (view.open) panel.removeAttribute('inert')
   else panel.setAttribute('inert', '')
-  const recording = panelMode === 'recording'
-  const playing = panelMode === 'playback'
   const stop = panel.querySelector('#recorder-stop')
   const pause = panel.querySelector('#recorder-pause')
   const play = panel.querySelector('#recorder-play')
   const close = panel.querySelector('#recorder-close')
-  if (stop) stop.hidden = !recording
+  if (stop) stop.hidden = view.stopHidden
   if (pause) {
-    pause.hidden = !recording
-    const paused = capture.phase === 'paused'
-    pause.innerHTML = paused ? PLAY_ICON : PAUSE_ICON
-    pause.setAttribute('aria-label', paused ? 'Resume recording' : 'Pause recording')
-    pause.setAttribute('aria-pressed', paused ? 'true' : 'false')
+    pause.hidden = view.pauseHidden
+    pause.innerHTML = view.pauseShowsPlay ? PLAY_ICON : PAUSE_ICON
+    pause.setAttribute('aria-label', view.pauseLabel)
+    pause.setAttribute('aria-pressed', view.pausePressed)
   }
   if (play) {
-    play.hidden = !playing
-    const paused = !playback?.audio || playback.audio.paused || playback.audio.ended
-    play.innerHTML = paused ? PLAY_ICON : PAUSE_ICON
-    play.setAttribute('aria-label', paused ? 'Play' : 'Pause')
-    play.setAttribute('aria-pressed', paused ? 'false' : 'true')
+    play.hidden = view.playHidden
+    play.innerHTML = view.playShowsPlay ? PLAY_ICON : PAUSE_ICON
+    play.setAttribute('aria-label', view.playLabel)
+    play.setAttribute('aria-pressed', view.playPressed)
   }
-  if (close) close.hidden = !playing
+  if (close) close.hidden = view.closeHidden
   syncMicControls()
   const canvas = panel.querySelector('#recorder-wave')
-  if (canvas) canvas.setAttribute('aria-label', playing ? 'Playback waveform' : 'Recording waveform')
+  if (canvas) canvas.setAttribute('aria-label', view.waveLabel)
 }
 
 function markActiveTake() {
@@ -731,7 +701,7 @@ function timeFromPointer(event, anchor) {
   const centerX = rect.width / 2
   const pxPerSec = anchor?.pxPerSec || timelineScale(rect.width).pxPerSec
   const now = anchor?.now || 0
-  return now + (x - centerX) / pxPerSec
+  return timeAtPointer({ x, centerX, pxPerSec, now })
 }
 
 function seekPlayback(timeSec) {
@@ -897,7 +867,7 @@ export async function renderTakes() {
   }
   if (token !== takesToken || !list.isConnected || takeTextKey(bridge.current()) !== key) return
   try {
-    takes.sort((a, b) => b.createdAt - a.createdAt)
+    takes = chooseTakes(takes, bridge.current())
     shownTakes = takes
     if (!takes.length) {
       list.innerHTML = '<li class="empty">No takes yet.</li>'
@@ -928,16 +898,7 @@ async function commitTake(meta, result) {
     return null
   }
   const exported = exportPeaks()
-  const take = {
-    textKey: meta.textKey,
-    code: meta.code,
-    title: meta.title,
-    createdAt: Date.now(),
-    durationMs: Math.max(0, Math.round(result.durationMs)),
-    mimeType: result.mimeType,
-    extension: result.extension,
-    blob: result.blob,
-  }
+  const take = storedTake({ meta, result, createdAt: Date.now() })
   let diskError = false
   let diskPath
   try {
