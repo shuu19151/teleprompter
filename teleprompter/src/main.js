@@ -16,8 +16,8 @@ import {
   positionApplies,
   positionStorageRecord,
   resolveSelection,
-} from './content-selection.js'
-import { isEssayFile } from './essay-files.js'
+} from './library/content-selection.js'
+import { isEssayFile } from './library/essay-files.js'
 import {
   READING_RATIO,
   anchorOffset,
@@ -32,7 +32,7 @@ import {
   remainingSeconds,
   restoreOffset,
   scriptFocusY as focusYFor,
-} from './reader-math.js'
+} from './reading/reader-math.js'
 import {
   clearSavedFolder,
   deleteEssayFile,
@@ -46,8 +46,8 @@ import {
   requestFolderPermission,
   revealEssayFile,
   saveFolderHandle,
-} from './essay-folder.js'
-import { elementFromEvent, openRowMenu } from './row-menu.js'
+} from './library/essay-folder.js'
+import { elementFromEvent, openRowMenu } from './shared/row-menu.js'
 import {
   isMarkdownName,
   isQuotaError,
@@ -67,8 +67,8 @@ import {
   updatedImportRecord,
   validateImportBody,
   writeImports,
-} from './text-import.js'
-import { warmRecordingStore } from './recording.js'
+} from './library/text-import.js'
+import { warmRecordingStore } from './recording/recording.js'
 import { bridge } from './ui-bridge.js'
 import {
   bindWavePointer,
@@ -101,7 +101,7 @@ import {
   togglePlayback,
   toggleRecording,
   voiceEnhanceControl,
-} from './recorder-ui.js'
+} from './recording/recorder-ui.js'
 
 const THEME_KEY = 'teleprompter:theme'
 const SPEED_KEY = 'teleprompter:speed'

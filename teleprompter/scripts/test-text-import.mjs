@@ -14,7 +14,7 @@ import {
   textBytes,
   updatedImportRecord,
   validateImportBody,
-} from '../src/text-import.js'
+} from '../src/library/text-import.js'
 
 const limit = 'a'.repeat(MAX_IMPORT_BYTES)
 const over = `${limit}b`

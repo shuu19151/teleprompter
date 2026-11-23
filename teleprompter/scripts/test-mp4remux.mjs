@@ -5,7 +5,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { after, before, test } from 'node:test'
-import { remuxFragmentedMp4, remuxMp4Blob } from '../src/mp4remux.js'
+import { remuxFragmentedMp4, remuxMp4Blob } from '../src/recording/mp4remux.js'
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mp4remux-'))
 const summary = []

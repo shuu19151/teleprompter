@@ -1,7 +1,7 @@
 import { documentDir, join } from '@tauri-apps/api/path'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { BaseDirectory, exists, mkdir, writeFile } from '@tauri-apps/plugin-fs'
-import { inTauri } from './essay-folder.js'
+import { inTauri } from '../library/essay-folder.js'
 import { takeFileName } from './recording.js'
 
 const DIR = 'Teleprompter'

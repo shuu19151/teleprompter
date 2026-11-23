@@ -14,7 +14,7 @@ import {
   remainingSeconds,
   restoreOffset,
   scriptFocusY,
-} from '../src/reader-math.js'
+} from '../src/reading/reader-math.js'
 
 const view = { readingFromTop: 80, focusShift: 8 }
 
