@@ -49,6 +49,8 @@ export function createNativeRecorder(handlers = {}) {
       const args = { textKey }
       if (options.deviceId) args.deviceId = options.deviceId
       if (Number.isInteger(options.channel) && options.channel >= 0) args.channel = options.channel
+      if (typeof options.code === 'string' && options.code) args.code = options.code
+      if (typeof options.title === 'string' && options.title) args.title = options.title
       try {
         return await invoke('recorder_start', args)
       } catch (error) {

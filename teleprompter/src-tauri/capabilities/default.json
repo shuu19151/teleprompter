@@ -20,6 +20,8 @@
     "allow-recorder-status",
     "allow-recorder-cancel",
     "allow-recorder-list-devices",
+    "allow-recorder-recover",
+    "allow-recorder-recover-apply",
     "allow-takes-list",
     "allow-takes-delete",
     "allow-takes-read",

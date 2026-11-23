@@ -90,6 +90,7 @@ export function createNativeCapture({
   armWave,
   disarmWave,
   getTextKey,
+  getTakeMeta,
   now = () => performance.now(),
   createClient = createNativeRecorder,
 } = {}) {
@@ -159,9 +160,15 @@ export function createNativeCapture({
     armWave?.(NATIVE_PEAK_STEP_MS)
     try {
       const textKey = getTextKey?.() || ''
+      const meta = getTakeMeta?.() || {}
       const deviceId = typeof options.deviceId === 'string' ? options.deviceId : ''
       const channel = Number.isInteger(options.channel) ? options.channel : undefined
-      await native.start(textKey, { deviceId, channel })
+      const code = typeof meta.code === 'string' ? meta.code : ''
+      const title = typeof meta.title === 'string' ? meta.title : ''
+      const startOptions = { deviceId, channel }
+      if (code) startOptions.code = code
+      if (title) startOptions.title = title
+      await native.start(textKey, startOptions)
       if (cancelStart || phase !== 'starting') {
         phase = 'idle'
         disarm()

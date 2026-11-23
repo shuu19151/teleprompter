@@ -82,6 +82,9 @@ export function createRecorderController({ microphone, ui, wave, takes, store, d
     getTextKey() {
       return (recordingMeta || takeMeta())?.textKey || ''
     },
+    getTakeMeta() {
+      return recordingMeta || takeMeta()
+    },
   })
 
   function onDeviceLost() {

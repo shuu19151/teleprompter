@@ -17,6 +17,7 @@ import { createReaderLayout } from './reading/reader-layout.js'
 import { createReaderProgress } from './reading/reader-progress.js'
 import { createReaderView } from './reading/reader-view.js'
 import { hasTauriGlobal, readNativeRecorderEnabled, selectRecorderBackend } from './recording/recorder-backend.js'
+import { recoverUnfinishedRecordings } from './recording/recorder-recovery.js'
 import { createRecorder } from './recording/recorder-ui.js'
 import { mountApp } from './shell/app-shell.js'
 import { createConfirmDialog } from './shell/confirm-dialog.js'
@@ -227,6 +228,17 @@ async function start() {
     onTakesMenuKey: recorder.onTakesMenuKey,
     renderSheet: view.renderSheet,
   })
+  if (inTauri()) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await recoverUnfinishedRecordings({
+        invoke: (command, args) => invoke(command, args),
+        askConfirm: (options) => confirmDialog.askConfirm(options),
+      })
+    } catch (error) {
+      console.error('Could not recover an unfinished recording.', error)
+    }
+  }
   recorder.watchAudioInputs()
   reader.remeasureWhenFontsReady()
 }
