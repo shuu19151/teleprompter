@@ -47,6 +47,8 @@ test('the web backend is the capture the controller already uses', () => {
   assert.equal(backend.phase, 'idle')
   assert.equal(backend.isActive(), false)
   assert.equal(backend.usesWebCapture, undefined)
+  assert.equal(backend.pause(), false)
+  assert.equal(backend.resume(), false)
   const fallback = createRecorderBackend(undefined, {})
   assert.equal(fallback.phase, 'idle')
   assert.equal(fallback.isActive(), false)
@@ -246,4 +248,141 @@ test('an error before the take is recording does not stop it early', async () =>
   await pending
   assert.equal(failed, 1)
   assert.equal(backend.phase, 'recording')
+})
+
+function tick() {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+test('native pause and resume freeze the clock and ignore levels while paused', async () => {
+  const calls = []
+  const levels = []
+  let handlers
+  let now = 1_000
+  const backend = createNativeCapture({
+    now: () => now,
+    onPeaks(batch) {
+      levels.push(['peaks', batch])
+    },
+    onMeter(meter) {
+      levels.push(['meter', meter])
+    },
+    armWave() {},
+    disarmWave() {},
+    getTextKey() {
+      return 'E01'
+    },
+    createClient(received) {
+      handlers = received
+      return {
+        async start() {
+          return { sessionId: 'sess-1', sampleRate: 48000 }
+        },
+        pause() {
+          calls.push('pause')
+          return Promise.resolve({ state: 'paused', durationMs: 400, sessionId: 'sess-1' })
+        },
+        resume() {
+          calls.push('resume')
+          return Promise.resolve({ state: 'recording', durationMs: 400, sessionId: 'sess-1' })
+        },
+        async stop() {
+          return {
+            path: 'seg-000.wav',
+            paths: ['seg-000.wav', 'seg-001.wav'],
+            durationMs: 650,
+            bytes: 80,
+            droppedSamples: 0,
+            peaks: [0.2, 0.3],
+          }
+        },
+        async cancel() {},
+        status() {
+          return Promise.resolve({ state: 'recording', durationMs: 400, sessionId: 'sess-1' })
+        },
+      }
+    },
+  })
+
+  assert.equal(backend.pause(), false)
+  assert.equal(backend.resume(), false)
+  await backend.start()
+  assert.equal(backend.phase, 'recording')
+  now = 1_400
+  assert.equal(backend.elapsedMs(), 400)
+  handlers.onPeaks({ startIndex: 0, values: [0.2] })
+  handlers.onMeter({ rms: 0.1, peak: 0.2, clipped: false })
+  assert.equal(levels.length, 2)
+
+  assert.equal(backend.pause(), true)
+  assert.equal(backend.phase, 'paused')
+  assert.equal(backend.pause(), false)
+  now = 5_000
+  assert.equal(backend.elapsedMs(), 400)
+  handlers.onPeaks({ startIndex: 1, values: [0.9] })
+  handlers.onMeter({ rms: 0.8, peak: 0.9, clipped: false })
+  assert.equal(levels.length, 2)
+
+  assert.equal(backend.resume(), true)
+  assert.equal(backend.phase, 'recording')
+  assert.equal(backend.resume(), false)
+  now = 5_250
+  assert.equal(backend.elapsedMs(), 650)
+  handlers.onPeaks({ startIndex: 1, values: [0.3] })
+  assert.deepEqual(levels[2], ['peaks', { startIndex: 1, values: [0.3] }])
+  await tick()
+  assert.deepEqual(calls, ['pause', 'resume'])
+
+  const logs = []
+  const original = console.info
+  console.info = (...args) => {
+    logs.push(args.join(' '))
+  }
+  try {
+    await backend.stop()
+  } finally {
+    console.info = original
+  }
+  assert.match(logs.join('\n'), /seg-000\.wav, seg-001\.wav/)
+  assert.equal(backend.phase, 'idle')
+})
+
+test('a failed native pause follows the recorder status', async () => {
+  let now = 2_000
+  const backend = createNativeCapture({
+    now: () => now,
+    armWave() {},
+    disarmWave() {},
+    getTextKey() {
+      return 'E01'
+    },
+    createClient() {
+      return {
+        async start() {
+          return { sessionId: 'sess-1', sampleRate: 48000 }
+        },
+        pause() {
+          return Promise.reject('{"code":"write","message":"could not write the recording: disk"}')
+        },
+        async resume() {
+          return { state: 'recording', durationMs: 10, sessionId: 'sess-1' }
+        },
+        status() {
+          return Promise.resolve({ state: 'recording', durationMs: 80, sessionId: 'sess-1' })
+        },
+        async stop() {
+          return null
+        },
+        async cancel() {},
+      }
+    },
+  })
+  await backend.start()
+  now = 2_080
+  assert.equal(backend.pause(), true)
+  assert.equal(backend.phase, 'paused')
+  await tick()
+  assert.equal(backend.phase, 'recording')
+  now = 2_100
+  assert.equal(backend.elapsedMs(), 100)
 })

@@ -1,6 +1,6 @@
 // Invoke and event wrapper for the native recorder.
 // Stop, cancel, and a failed start drop the event listeners.
-// A rejected command is a JSON string: {"code","message"}.
+// Pause and resume keep them. A rejected command is a JSON string: {"code","message"}.
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
@@ -55,6 +55,12 @@ export function createNativeRecorder(handlers = {}) {
         await unsubscribe()
         throw error
       }
+    },
+    pause() {
+      return invoke('recorder_pause')
+    },
+    resume() {
+      return invoke('recorder_resume')
     },
     async stop() {
       try {

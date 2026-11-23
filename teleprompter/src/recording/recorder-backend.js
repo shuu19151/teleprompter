@@ -77,8 +77,9 @@ export function nativeStartError(error) {
 
 /**
  * Native take. The stored take list still expects an M4A blob, so stop does
- * not invent one. The WAV is already in Documents/Teleprompter/.sessions,
- * and the returned path is written to the console.
+ * not invent one. Segments are already in Documents/Teleprompter/.sessions,
+ * and their paths are written to the console. Pause and resume use the same
+ * button states as the web capture. The clock counts recorded time only.
  */
 export function createNativeCapture({
   onError,
@@ -89,6 +90,7 @@ export function createNativeCapture({
   armWave,
   disarmWave,
   getTextKey,
+  now = () => performance.now(),
   createClient = createNativeRecorder,
 } = {}) {
   let phase = 'idle'
@@ -98,11 +100,15 @@ export function createNativeCapture({
   let stopWait = null
   let pendingError = false
 
+  let transport = Promise.resolve()
+
   const native = createClient({
     onMeter(payload) {
+      if (!levelsOpen()) return
       onMeter?.(payload)
     },
     onPeaks(payload) {
+      if (!levelsOpen()) return
       onPeaks?.(payload)
     },
     onState(payload) {
@@ -114,9 +120,22 @@ export function createNativeCapture({
     },
   })
 
+  function levelsOpen() {
+    // Paused drops meter and peak events so the waveform stays still.
+    // Stopping still accepts the last batch the writer flushes with the file.
+    return phase === 'starting' || phase === 'recording' || phase === 'stopping'
+  }
+
   function elapsedMs() {
-    if (phase === 'recording') return accumulated + (performance.now() - segmentStart)
+    if (phase === 'recording') return accumulated + (now() - segmentStart)
     return accumulated
+  }
+
+  function enqueue(task) {
+    transport = transport.then(task, task).then(
+      () => {},
+      () => {},
+    )
   }
 
   function isActive() {
@@ -149,7 +168,7 @@ export function createNativeCapture({
         await native.cancel().catch(() => {})
         return { started: false, cancelled: true }
       }
-      segmentStart = performance.now()
+      segmentStart = now()
       phase = 'recording'
       if (pendingError) {
         pendingError = false
@@ -165,17 +184,89 @@ export function createNativeCapture({
   }
 
   function pause() {
-    return false
+    if (phase !== 'recording') return false
+    accumulated += now() - segmentStart
+    phase = 'paused'
+    enqueue(async () => {
+      try {
+        await native.pause()
+      } catch {
+        await recover('paused')
+      }
+    })
+    return true
   }
 
   function resume() {
-    return false
+    if (phase !== 'paused') return false
+    segmentStart = now()
+    phase = 'recording'
+    enqueue(async () => {
+      try {
+        await native.resume()
+      } catch {
+        await recover('recording')
+      }
+    })
+    return true
+  }
+
+  async function recover(expecting) {
+    if (phase !== expecting) return
+    let status = null
+    try {
+      status = await native.status()
+    } catch {
+      status = null
+    }
+    if (phase !== expecting) return
+    if (!status || typeof status.state !== 'string') {
+      restoreOptimistic(expecting)
+      return
+    }
+    applyStatus(status)
+  }
+
+  function restoreOptimistic(expecting) {
+    if (expecting === 'paused') {
+      segmentStart = now()
+      phase = 'recording'
+      return
+    }
+    accumulated += now() - segmentStart
+    phase = 'paused'
+  }
+
+  function applyStatus(status) {
+    if (phase === 'idle' || phase === 'stopping' || phase === 'starting') return
+    if (status.state === 'paused') {
+      accumulated = Number(status.durationMs) || 0
+      phase = 'paused'
+      return
+    }
+    if (status.state === 'recording') {
+      accumulated = Number(status.durationMs) || 0
+      segmentStart = now()
+      phase = 'recording'
+      return
+    }
+    if (status.state === 'idle') {
+      phase = 'idle'
+      disarm()
+    }
+  }
+
+  function segmentPaths(stopped) {
+    if (Array.isArray(stopped?.paths) && stopped.paths.length) return stopped.paths
+    if (stopped?.path) return [stopped.path]
+    return []
   }
 
   function logTake(stopped) {
-    if (!stopped?.path) return
+    const paths = segmentPaths(stopped)
+    if (!paths.length) return
     const peaks = Array.isArray(stopped.peaks) ? stopped.peaks.length : 0
-    console.info(`native recorder wav ${stopped.path} (${Number(stopped.durationMs) || 0} ms, ${peaks} peaks)`)
+    console.info(`native recorder wav ${paths.join(', ')} (${Number(stopped.durationMs) || 0} ms, ${peaks} peaks)`)
   }
 
   async function finishStop() {
@@ -195,6 +286,7 @@ export function createNativeCapture({
     phase = 'stopping'
     let stopped = null
     try {
+      await transport
       stopped = await native.stop()
     } catch {
       stopped = null

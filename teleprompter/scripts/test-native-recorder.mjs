@@ -17,6 +17,12 @@ mock.module('@tauri-apps/api/core', {
         )
       }
       if (command === 'recorder_start') return Promise.resolve({ sessionId: 'sess-1', sampleRate: 48000 })
+      if (command === 'recorder_pause') {
+        return Promise.resolve({ state: 'paused', durationMs: 40, sessionId: 'sess-1' })
+      }
+      if (command === 'recorder_resume') {
+        return Promise.resolve({ state: 'recording', durationMs: 40, sessionId: 'sess-1' })
+      }
       if (command === 'recorder_stop' && failStop) {
         return Promise.reject('{"code":"write","message":"could not write the recording: disk"}')
       }
@@ -120,6 +126,36 @@ test('native recorder commands invoke the rust recorder and forward events', asy
   assert.deepEqual(unsubscribed, EVENT_NAMES)
   assert.deepEqual(await recorder.status(), { state: 'idle', durationMs: 0, sessionId: null })
   assert.deepEqual(calls.map((call) => call.command), ['recorder_start', 'recorder_stop', 'recorder_status'])
+})
+
+test('pause and resume invoke the native commands and keep the listeners', async () => {
+  reset()
+  const seen = []
+  const recorder = createNativeRecorder({
+    onState(payload) {
+      seen.push(payload)
+    },
+    onMeter(payload) {
+      seen.push(payload)
+    },
+  })
+  await recorder.start('E01')
+  unsubscribed.length = 0
+  assert.deepEqual(await recorder.pause(), { state: 'paused', durationMs: 40, sessionId: 'sess-1' })
+  emit('recorder://state', { state: 'paused', durationMs: 40 })
+  assert.deepEqual(await recorder.resume(), { state: 'recording', durationMs: 40, sessionId: 'sess-1' })
+  emit('recorder://meter', { rms: 0.2, peak: 0.4, clipped: false })
+  assert.deepEqual(seen, [
+    { state: 'paused', durationMs: 40 },
+    { rms: 0.2, peak: 0.4, clipped: false },
+  ])
+  assert.equal(unsubscribed.length, 0)
+  await recorder.stop()
+  assert.deepEqual(unsubscribed, EVENT_NAMES)
+  assert.deepEqual(
+    calls.map((call) => call.command),
+    ['recorder_start', 'recorder_pause', 'recorder_resume', 'recorder_stop'],
+  )
 })
 
 test('stop and cancel unsubscribe even when the command rejects', async () => {
