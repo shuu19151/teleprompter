@@ -179,21 +179,41 @@ export function createRecorderController({ microphone, ui, wave, takes, store, d
       return null
     }
     if (result?.savedToDisk) {
+      const sameText = takeTextKey(deps.current()) === meta?.textKey
+      const showNow = Boolean(sameText && openAfterSave && result.name)
+      // The file is already on disk when stop returns. Flip stop to play
+      // before the take list and the blob read, which used to hold the button.
+      if (showNow) showSavedPlayback(meta, result)
+      else leaveRecordingPanel()
       try {
-        await takes.renderTakes()
-        const rows = await store.list()
-        const saved = rows.find(
-          (row) =>
-            (result.name && row.name === result.name) ||
-            (result.diskPath && row.diskPath === result.diskPath),
-        )
-        const sameText = takeTextKey(deps.current()) === meta?.textKey
-        if (saved && sameText && openAfterSave) {
-          const blob = await store.readBlob(saved)
-          await openPlayback({ ...saved, blob })
-        } else leaveRecordingPanel()
-        if (saved) ui.noteTakeSaved()
-        return saved || null
+        const listed = takes.renderTakes()
+        if (showNow) {
+          const blob = await store.readBlob({
+            id: result.name,
+            name: result.name,
+            mimeType: result.mimeType || 'audio/mp4',
+          })
+          await openPlayback({
+            id: result.name,
+            name: result.name,
+            diskPath: result.diskPath,
+            textKey: meta?.textKey || '',
+            durationMs: result.durationMs || 0,
+            mimeType: result.mimeType || 'audio/mp4',
+            peaks: result.peaks,
+            livePeaks: result.peaks,
+            blob,
+          })
+        }
+        await listed
+        ui.noteTakeSaved()
+        return {
+          id: result.name,
+          name: result.name,
+          diskPath: result.diskPath,
+          textKey: meta?.textKey || '',
+          durationMs: result.durationMs || 0,
+        }
       } catch {
         ui.showRecMessage(inTauri() ? DISK_TAKE_MESSAGE : SAVE_TAKE_MESSAGE)
         leaveRecordingPanel()
@@ -349,6 +369,34 @@ export function createRecorderController({ microphone, ui, wave, takes, store, d
     recWithRun = Boolean(event.target.checked)
     writeStorage(REC_WITH_RUN_KEY, JSON.stringify(recWithRun))
     syncRecorderToRun()
+  }
+
+  function showSavedPlayback(meta, result) {
+    releasePlayback()
+    const exported = wave.exportPeaks()
+    const fromStop = Array.isArray(result?.peaks) && result.peaks.length ? result.peaks : null
+    const peaks = fromStop || exported.peaks
+    const durationMs = Number(result?.durationMs) || 0
+    playback = {
+      take: {
+        id: result.name,
+        name: result.name,
+        diskPath: result.diskPath,
+        textKey: meta?.textKey || '',
+        durationMs,
+        mimeType: result.mimeType || 'audio/mp4',
+      },
+      url: '',
+      audio: null,
+      peaks,
+      peakOrigin: fromStop ? 0 : exported.origin || 0,
+      peakStep: peaks?.length && durationMs > 0 ? durationMs / 1000 / peaks.length : WAVE_STEP_MS / 1000,
+      ratio: 0,
+    }
+    panelMode = 'playback'
+    ui.syncPanelChrome()
+    wave.paintPlayback()
+    takes.markActiveTake()
   }
 
   async function openPlayback(take) {

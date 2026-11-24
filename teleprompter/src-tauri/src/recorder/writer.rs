@@ -15,8 +15,10 @@
 //! Peak index 0 is the first kept sample, which is also time zero for the clock.
 //!
 //! Every `rotate_after` output frames the open file is finalized and the next
-//! sample opens `seg-NNN.wav`. That work stays on this thread. The capture
-//! callback only pushes into the ring.
+//! sample opens `seg-NNN.wav`. That work stays on this thread. The same thread
+//! feeds each kept sample to the AAC encoder, including across pause, and
+//! holds the access units until stop. The capture callback only pushes into
+//! the ring.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,9 +33,10 @@ use rubato::{Fft, FixedSync, Indexing, Resampler};
 
 use super::events::{ErrorEvent, RecorderEmit, notify_device_lost};
 use super::levels::{self, LevelTick, LevelWindow};
+use super::m4a::{AacStream, EncodedAac};
 use super::session::{self, SessionStore};
 use super::voice::VoiceChain;
-use super::wav::WavFile;
+use super::wav::{self, WavFile};
 use super::{OUTPUT_SAMPLE_RATE, RecorderError};
 
 const RESAMPLE_CHUNK: usize = 1024;
@@ -58,6 +61,8 @@ pub struct WriterDone {
   #[allow(dead_code)]
   pub paused_samples: u64,
   pub peaks: Vec<f32>,
+  /// AAC frames for the samples in the WAV segments. Empty when nothing was kept.
+  pub encoded: EncodedAac,
 }
 
 enum WriterCommand {
@@ -137,6 +142,7 @@ pub fn spawn_writer(
   rotate_after: u64,
   session: Option<Arc<SessionStore>>,
 ) -> Result<WriterHandle, RecorderError> {
+  let encoder = AacStream::new()?;
   let stop = Arc::new(AtomicBool::new(false));
   let stop_flag = Arc::clone(&stop);
   let emit_thread = Arc::clone(&emit);
@@ -158,6 +164,7 @@ pub fn spawn_writer(
         command_rx,
         rotate_after,
         session,
+        encoder,
       )
     })
     .map_err(|error| RecorderError::Write(error.to_string()))?;
@@ -183,6 +190,7 @@ fn write_loop(
   commands: Receiver<WriterCommand>,
   rotate_after: u64,
   session: Option<Arc<SessionStore>>,
+  encoder: AacStream,
 ) -> Result<WriterDone, RecorderError> {
   match write_audio(
     consumer,
@@ -198,6 +206,7 @@ fn write_loop(
     commands,
     rotate_after,
     session,
+    encoder,
   ) {
     Ok(done) => Ok(done),
     Err(error) => {
@@ -221,8 +230,9 @@ fn write_audio(
   commands: Receiver<WriterCommand>,
   rotate_after: u64,
   store: Option<Arc<SessionStore>>,
+  encoder: AacStream,
 ) -> Result<WriterDone, RecorderError> {
-  let mut session = SessionWriter::open(&path, capture_rate, rotate_after, store)?;
+  let mut session = SessionWriter::open(&path, capture_rate, rotate_after, store, encoder)?;
   let mut batch = [0.0f32; 256];
   let mut fault_sent = false;
   loop {
@@ -309,6 +319,7 @@ fn write_audio(
     dropped_samples,
     paused_samples: done.paused_samples,
     peaks: done.peaks,
+    encoded: done.encoded,
   })
 }
 
@@ -399,6 +410,7 @@ struct SessionDone {
   paused_samples: u64,
   peaks: Vec<f32>,
   tail: Option<LevelTick>,
+  encoded: EncodedAac,
 }
 
 struct SessionWriter {
@@ -421,6 +433,7 @@ struct SessionWriter {
   fallback_index: u32,
   store: Option<Arc<SessionStore>>,
   voice: VoiceChain,
+  encoder: AacStream,
 }
 
 impl SessionWriter {
@@ -429,6 +442,7 @@ impl SessionWriter {
     capture_rate: u32,
     rotate_after: u64,
     store: Option<Arc<SessionStore>>,
+    encoder: AacStream,
   ) -> Result<Self, RecorderError> {
     let directory = path
       .parent()
@@ -454,6 +468,7 @@ impl SessionWriter {
       fallback_index: 1,
       store,
       voice: VoiceChain::new(OUTPUT_SAMPLE_RATE),
+      encoder,
     })
   }
 
@@ -497,13 +512,16 @@ impl SessionWriter {
     }
     self.ensure_open()?;
     let sample = self.voice.process(sample);
+    let pcm = wav::f32_to_i16(sample);
     {
       let wav = self
         .wav
         .as_mut()
         .ok_or_else(|| RecorderError::Write("the segment is not open".into()))?;
-      wav.write_f32(sample)?;
+      wav.write_i16(pcm)?;
     }
+    // Same samples as the WAV, including across pause and segment rotation.
+    self.encoder.push_sample(pcm)?;
     self.levels.push_sample(sample);
     let frames = self.wav.as_ref().map(WavFile::frames).unwrap_or(0);
     if self.rotate_after > 0 && frames >= self.rotate_after {
@@ -613,12 +631,19 @@ impl SessionWriter {
     } else {
       self.close_open_segment()?
     };
+    let encoded = self.encoder.finish()?;
+    if encoded.pcm_frames != self.closed_frames {
+      return Err(RecorderError::Write(
+        "the encoded audio does not match the recording".into(),
+      ));
+    }
     Ok(SessionDone {
       frames: self.closed_frames,
       bytes: self.closed_bytes,
       paused_samples: self.paused_samples,
       peaks: self.levels.take_peaks(),
       tail,
+      encoded,
     })
   }
 
@@ -1247,6 +1272,83 @@ mod tests {
     assert!(first_pcm.iter().any(|sample| *sample != 0));
     assert!(second_pcm.iter().any(|sample| *sample != 0));
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn pause_and_resume_stream_matches_one_shot_of_the_wavs() {
+    let dir = std::env::temp_dir().join(format!(
+      "teleprompter-stream-pause-{}-{}",
+      std::process::id(),
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let first_path = dir.join("seg-000.wav");
+    let second_path = dir.join("seg-001.wav");
+    let (mut producer, consumer) = RingBuffer::new(8_192);
+    let (emit, fault) = test_emit();
+    let (device_id, loss) = loss_args();
+    let handle = spawn_writer(
+      consumer,
+      std::sync::Arc::new(AtomicU64::new(0)),
+      first_path.clone(),
+      48_000,
+      std::sync::Arc::new(AtomicU64::new(0)),
+      emit,
+      fault,
+      device_id,
+      loss,
+      u64::MAX,
+      None,
+    )
+    .unwrap();
+    let first: Vec<f32> = (0..3_000)
+      .map(|index| {
+        let step = std::f32::consts::TAU * 440.0 / 48_000.0;
+        (step * index as f32 + 0.3).sin() * 0.4
+      })
+      .collect();
+    for sample in &first {
+      producer.push(*sample).unwrap();
+    }
+    handle.pause().unwrap();
+    for _ in 0..400 {
+      producer.push(0.8).unwrap();
+    }
+    handle.resume(second_path.clone()).unwrap();
+    let second: Vec<f32> = (0..2_500)
+      .map(|index| {
+        let step = std::f32::consts::TAU * 660.0 / 48_000.0;
+        (step * index as f32 + 0.2).sin() * -0.35
+      })
+      .collect();
+    for sample in &second {
+      producer.push(*sample).unwrap();
+    }
+    drop(producer);
+    let done = handle.finish().unwrap();
+    assert_eq!(done.paused_samples, 400);
+    assert_eq!(done.encoded.pcm_frames, done.frames);
+    let mut pcm = read_i16(&first_path);
+    pcm.extend(read_i16(&second_path));
+    assert_eq!(pcm.len() as u64, done.frames);
+    let once = crate::recorder::m4a::encode_aac_lc(&pcm).unwrap();
+    let streamed = crate::recorder::m4a::mux_encoded(&done.encoded).unwrap();
+    assert_eq!(streamed, once);
+    let info = crate::recorder::m4a::verify_m4a(&streamed, done.frames).unwrap();
+    assert_eq!(info.major_brand, *b"M4A ");
+    assert!(info.faststart);
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  fn read_i16(path: &std::path::Path) -> Vec<i16> {
+    hound::WavReader::open(path)
+      .unwrap()
+      .samples::<i16>()
+      .map(|sample| sample.unwrap())
+      .collect()
   }
 
   #[test]

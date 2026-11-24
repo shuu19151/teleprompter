@@ -16,10 +16,13 @@
 //! audio, finalizes the file it just closed, and rewrites `session.json`.
 //! Duration counts written frames only, so the pause is not part of it. The
 //! writer runs the voice chain (90 Hz highpass, compressor, makeup, limiter)
-//! on each sample it keeps, after it has dropped leading zeros. A lost device
-//! finalizes the open segment, including while paused, and emits
-//! `recorder://device-lost`. Stop and crash-recovery Save encode the segments
-//! to one AAC-LC M4A take and delete the session only after that file checks out.
+//! on each sample it keeps, after it has dropped leading zeros, and feeds that
+//! PCM to the AAC encoder on the same thread. A lost device finalizes the open
+//! segment, including while paused, and emits `recorder://device-lost`. Stop
+//! muxes the access units already encoded, reuses the writer's peaks, and
+//! deletes the session only after one light check of the final m4a. Crash
+//! recovery still reads the WAV segments and encodes them, because a killed
+//! process has no streamed frames.
 
 mod capture;
 mod device;
@@ -436,7 +439,12 @@ impl ActiveSession {
         take_name: String::new(),
       })
     } else {
-      match recovery::save_session(&directory, &recovery::takes_dir_for(&directory)) {
+      match recovery::save_streamed(
+        &directory,
+        &recovery::takes_dir_for(&directory),
+        &done.encoded,
+        &done.peaks,
+      ) {
         Ok(saved) => Ok(StopResponse {
           path: paths.first().cloned().unwrap_or_default(),
           paths,
@@ -1199,6 +1207,65 @@ mod tests {
   }
 
   #[test]
+  fn stop_of_a_six_minute_take_does_not_reread_or_fully_decode() {
+    const MINUTES: u64 = 6;
+    let frames = MINUTES * 60 * u64::from(OUTPUT_SAMPLE_RATE);
+    let dir = scratch_dir();
+    let mut recorder = RecorderInner::new();
+    let (started, mut producer) = recorder
+      .start_fed(dir.path(), "E01", 32_768, Arc::new(events::NopEmit))
+      .unwrap();
+    let session_path = dir.path().join(&started.session_id);
+    let step = std::f32::consts::TAU * 440.0 / OUTPUT_SAMPLE_RATE as f32;
+    let mut sent = 0u64;
+    while sent < frames {
+      let count = ((frames - sent) as usize).min(4_096);
+      for offset in 0..count {
+        let sample = (step * (sent + offset as u64) as f32 + 0.4).sin() * 0.25;
+        loop {
+          match producer.push(sample) {
+            Ok(()) => break,
+            Err(_) => std::thread::sleep(std::time::Duration::from_micros(50)),
+          }
+        }
+      }
+      sent += count as u64;
+    }
+    drop(producer);
+    wait_written_for(&recorder, frames, std::time::Duration::from_secs(30));
+    let reads = super::recovery::pcm_reads();
+    let decodes = super::m4a::full_decodes();
+    let started_stop = std::time::Instant::now();
+    let stopped = recorder.stop().unwrap();
+    let elapsed = started_stop.elapsed();
+    assert_eq!(
+      super::recovery::pcm_reads(),
+      reads,
+      "stop re-read the WAV segments"
+    );
+    assert_eq!(
+      super::m4a::full_decodes(),
+      decodes,
+      "stop decoded the whole m4a"
+    );
+    let limit = if cfg!(debug_assertions) {
+      std::time::Duration::from_secs(2)
+    } else {
+      std::time::Duration::from_millis(500)
+    };
+    assert!(
+      elapsed < limit,
+      "stop of a {MINUTES}-minute take took {elapsed:?}, limit {limit:?}"
+    );
+    assert_saved_take(&stopped, frames);
+    assert!(
+      !session_path.exists(),
+      "session was kept after the streamed m4a was saved"
+    );
+    eprintln!("six-minute stop took {elapsed:?}");
+  }
+
+  #[test]
   fn a_stream_fault_while_paused_still_leaves_a_readable_segment() {
     let dir = scratch_dir();
     let emit = Arc::new(MemoryEmit::default());
@@ -1415,6 +1482,10 @@ mod tests {
   }
 
   fn wait_written(recorder: &RecorderInner, frames: u64) {
+    wait_written_for(recorder, frames, std::time::Duration::from_secs(2));
+  }
+
+  fn wait_written_for(recorder: &RecorderInner, frames: u64, limit: std::time::Duration) {
     let started = std::time::Instant::now();
     loop {
       let written = recorder
@@ -1425,7 +1496,7 @@ mod tests {
       if written >= frames {
         return;
       }
-      if started.elapsed() > std::time::Duration::from_secs(2) {
+      if started.elapsed() > limit {
         panic!("writer did not reach {frames} frames (saw {written})");
       }
       std::thread::sleep(std::time::Duration::from_millis(5));
