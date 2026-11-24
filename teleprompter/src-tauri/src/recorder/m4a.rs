@@ -83,6 +83,7 @@ impl AacStream {
     })
   }
 
+  #[cfg(test)]
   pub fn push(&mut self, samples: &[i16]) -> Result<(), RecorderError> {
     if samples.is_empty() {
       return Ok(());
@@ -272,6 +273,7 @@ pub fn encode_aac_lc(pcm: &[i16]) -> Result<Vec<u8>, RecorderError> {
   mux_m4a(&frames, pcm.len() as u64, delay as u64, &asc)
 }
 
+#[cfg(test)]
 pub fn verify_m4a(bytes: &[u8], pcm_frames: u64) -> Result<M4aInfo, RecorderError> {
   let info = check_container(bytes, pcm_frames)?;
   let decoded = decode_payload(bytes)?;
@@ -872,11 +874,13 @@ pub fn full_decodes() -> u64 {
   FULL_DECODES.with(|cell| cell.get())
 }
 
+#[cfg(test)]
 fn note_full_decode() {
   #[cfg(test)]
   FULL_DECODES.with(|cell| cell.set(cell.get().saturating_add(1)));
 }
 
+#[cfg(test)]
 fn decode_payload(bytes: &[u8]) -> Result<Decoded, RecorderError> {
   note_full_decode();
   let top = read_boxes(bytes).map_err(|error| RecorderError::Write(error))?;
@@ -1018,6 +1022,7 @@ fn sample_asc(moov: &[u8]) -> Result<Vec<u8>, RecorderError> {
   Ok(asc)
 }
 
+#[cfg(test)]
 fn frame_bytes(moov: &[u8], mdat: &[u8]) -> Result<Vec<Vec<u8>>, RecorderError> {
   let sizes = sample_sizes(moov)?;
   let mut frames = Vec::with_capacity(sizes.len());

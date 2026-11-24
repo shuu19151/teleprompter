@@ -60,6 +60,7 @@ impl LevelWindow {
     }
   }
 
+  #[cfg(test)]
   pub fn push_slice(&mut self, samples: &[f32]) {
     for sample in samples {
       self.push_sample(*sample);
