@@ -1,14 +1,47 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  MAX_PLAYHEAD_LEAD_MS,
   NATIVE_PEAK_STEP_MS,
   createNativeCapture,
   createRecorderBackend,
   hasTauriGlobal,
+  nativePlayheadMs,
   nativeStartError,
   parseRecorderError,
+  peakBatchEndMs,
   selectRecorderBackend,
 } from '../src/recording/recorder-backend.js'
+
+test('native bars stay on the kept-sample clock and within 100 ms of the playhead', () => {
+  assert.equal(MAX_PLAYHEAD_LEAD_MS, 100)
+  assert.equal(peakBatchEndMs({ startIndex: 0, values: [0.2, 0.4] }), 40)
+  assert.equal(peakBatchEndMs({ startIndex: 2, values: [0.5], endMs: 60 }), 60)
+  assert.equal(peakBatchEndMs({ values: [] }), 0)
+  assert.equal(peakBatchEndMs(null), 0)
+
+  // Wall clock says 5.23s because start() returned 1.93s before the first
+  // kept sample. The bars only cover the kept 3.30s. The playhead follows
+  // the bars, not that wall clock.
+  const lastBarEndMs = 3_300
+  const playhead = nativePlayheadMs({
+    haveRecorded: true,
+    recordedMs: lastBarEndMs,
+    sinceMs: 1_930,
+    lastBarEndMs,
+  })
+  assert.equal(playhead, lastBarEndMs + MAX_PLAYHEAD_LEAD_MS)
+  assert.ok(playhead - lastBarEndMs <= 100)
+  assert.ok(playhead >= lastBarEndMs)
+
+  // No kept sample yet: the clock stays at the onset instead of running
+  // through the leading silence.
+  assert.equal(nativePlayheadMs({ haveRecorded: false, sinceMs: 5_230, lastBarEndMs: 0 }), 0)
+  assert.equal(
+    nativePlayheadMs({ haveRecorded: true, recordedMs: 40, sinceMs: 0, lastBarEndMs: 40 }),
+    40,
+  )
+})
 
 test('the desktop window records natively and the Vite page stays on MediaRecorder', () => {
   assert.equal(NATIVE_PEAK_STEP_MS, 20)
@@ -296,27 +329,32 @@ test('native pause and resume freeze the clock and ignore levels while paused', 
   await backend.start()
   assert.equal(backend.phase, 'recording')
   now = 1_400
-  assert.equal(backend.elapsedMs(), 400)
-  handlers.onPeaks({ startIndex: 0, values: [0.2] })
+  assert.equal(backend.elapsedMs(), 0)
+  handlers.onPeaks({ startIndex: 0, values: [0.2, 0.4], endMs: 40 })
   handlers.onMeter({ rms: 0.1, peak: 0.2, clipped: false })
+  assert.equal(backend.elapsedMs(), 40)
   assert.equal(levels.length, 2)
+  now = 1_490
+  assert.equal(backend.elapsedMs(), 130)
 
   assert.equal(backend.pause(), true)
   assert.equal(backend.phase, 'paused')
   assert.equal(backend.pause(), false)
   now = 5_000
-  assert.equal(backend.elapsedMs(), 400)
-  handlers.onPeaks({ startIndex: 1, values: [0.9] })
+  assert.equal(backend.elapsedMs(), 130)
+  handlers.onPeaks({ startIndex: 2, values: [0.9] })
   handlers.onMeter({ rms: 0.8, peak: 0.9, clipped: false })
   assert.equal(levels.length, 2)
 
   assert.equal(backend.resume(), true)
   assert.equal(backend.phase, 'recording')
   assert.equal(backend.resume(), false)
-  now = 5_250
-  assert.equal(backend.elapsedMs(), 650)
-  handlers.onPeaks({ startIndex: 1, values: [0.3] })
-  assert.deepEqual(levels[2], ['peaks', { startIndex: 1, values: [0.3] }])
+  now = 5_040
+  assert.equal(backend.elapsedMs(), 140)
+  handlers.onPeaks({ startIndex: 2, values: [0.3], endMs: 60 })
+  assert.deepEqual(levels[2], ['peaks', { startIndex: 2, values: [0.3], endMs: 60 }])
+  assert.equal(backend.elapsedMs(), 140)
+  assert.ok(backend.elapsedMs() - 60 <= MAX_PLAYHEAD_LEAD_MS)
   await tick()
   assert.deepEqual(calls, ['pause', 'resume'])
 

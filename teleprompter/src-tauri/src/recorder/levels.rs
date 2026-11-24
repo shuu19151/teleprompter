@@ -9,6 +9,9 @@ use super::events::{MeterEvent, PeaksEvent};
 pub const PEAK_INTERVAL_MS: u32 = 20;
 /// How often the writer publishes a meter and the peaks collected since the last one.
 pub const METER_INTERVAL_MS: u32 = 50;
+/// The page gives up waiting for a real sample after this long. The writer
+/// does too, so a silent device still starts the timeline.
+pub const LEADING_TIMEOUT_MS: u32 = 1_500;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LevelTick {
@@ -117,11 +120,32 @@ impl LevelWindow {
     }
     let values = std::mem::take(&mut self.pending);
     let start_index = self.pending_start;
+    let end_ms = peak_end_ms(start_index, values.len());
     Some(PeaksEvent {
       start_index,
+      end_ms,
       values,
     })
   }
+}
+
+/// Recorded time, in ms, at the end of a peak batch. Index 0 is the first
+/// sample the writer kept, not the moment `recorder_start` returned.
+pub fn peak_end_ms(start_index: u64, count: usize) -> u64 {
+  start_index
+    .saturating_add(u64::try_from(count).unwrap_or(u64::MAX))
+    .saturating_mul(u64::from(PEAK_INTERVAL_MS))
+}
+
+/// `barHeight` hides a level whose 0.75 power is below 0.05.
+pub fn wave_hide_level() -> f32 {
+  0.05_f32.powf(1.0 / 0.75)
+}
+
+/// A constant sample quieter than this cannot paint a bar: the page mixes
+/// `max(peak, rms * 2.5)`, which is `2.5 * amplitude` for a constant window.
+pub fn leading_sample_floor() -> f32 {
+  wave_hide_level() / 2.5
 }
 
 pub fn frames_for_ms(sample_rate: u32, ms: u32) -> usize {
@@ -267,9 +291,11 @@ mod tests {
     let first = ticks[0].peaks.as_ref().unwrap();
     assert_eq!(first.start_index, 0);
     assert_eq!(first.values.len(), 2);
+    assert_eq!(first.end_ms, 40);
     let second = ticks[1].peaks.as_ref().unwrap();
     assert_eq!(second.start_index, 2);
     assert_eq!(second.values.len(), 3);
+    assert_eq!(second.end_ms, 100);
     for value in first.values.iter().chain(second.values.iter()) {
       assert!((value - 0.625).abs() < 1.0e-5);
     }
@@ -287,6 +313,7 @@ mod tests {
     let tail = window.finish().unwrap();
     let peaks = tail.peaks.unwrap();
     assert_eq!(peaks.start_index, 0);
+    assert_eq!(peaks.end_ms, 20);
     assert_eq!(peaks.values.len(), 1);
     assert!(peaks.values[0] > 0.5);
     assert!((tail.meter.unwrap().peak - 0.5).abs() < 1.0e-6);

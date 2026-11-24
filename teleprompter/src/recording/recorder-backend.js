@@ -8,6 +8,38 @@ import { createNativeRecorder } from './native-recorder.js'
 
 /** One bar per 20 ms, the same window the native writer uses. */
 export const NATIVE_PEAK_STEP_MS = 20
+/** The playhead may sit this far past the last closed bar while the next bin is still open. */
+export const MAX_PLAYHEAD_LEAD_MS = 100
+
+/**
+ * Recorded time at the end of a peak batch. `endMs` is the writer's clock.
+ * Without it, the batch is `startIndex` bars of `stepMs` from the first kept sample.
+ */
+export function peakBatchEndMs(batch, stepMs = NATIVE_PEAK_STEP_MS) {
+  const count = batch?.values?.length || 0
+  if (!count || !(stepMs > 0)) return 0
+  const explicit = Number(batch.endMs)
+  if (Number.isFinite(explicit) && explicit >= 0) return explicit
+  const start = Number(batch.startIndex)
+  const origin = Number.isFinite(start) && start > 0 ? Math.floor(start) : 0
+  return (origin + count) * stepMs
+}
+
+/**
+ * Native playhead. Time zero is the first sample the writer kept, not the
+ * moment start() returned. Wall time since start includes leading silence
+ * the writer drops, so it runs ahead of the bars. Between batches the
+ * playhead may run at most `MAX_PLAYHEAD_LEAD_MS` past the last closed bar.
+ */
+export function nativePlayheadMs({ recordedMs = 0, sinceMs = 0, lastBarEndMs = 0, haveRecorded = false } = {}) {
+  if (!haveRecorded) return 0
+  const recorded = Math.max(0, Number(recordedMs) || 0)
+  const since = Math.max(0, Number(sinceMs) || 0)
+  const last = Math.max(0, Number(lastBarEndMs) || 0)
+  const extrapolated = recorded + since
+  const cap = last > 0 ? last + MAX_PLAYHEAD_LEAD_MS : MAX_PLAYHEAD_LEAD_MS
+  return Math.min(extrapolated, cap)
+}
 
 /** `window.__TAURI__` is present because the shell sets withGlobalTauri. */
 export function hasTauriGlobal(win) {
@@ -70,7 +102,9 @@ export function nativeStartError(error) {
  * Native take. The writer encodes AAC while recording. Stop muxes that audio
  * to an M4A file in Documents and returns the path plus the peaks it already
  * folded. The page does not build a second blob. Pause and resume use the
- * same button states as the web capture. The clock counts recorded time only.
+ * same button states as the web capture. The clock counts kept samples only.
+ * It stays at zero until the first sample the writer keeps, then stays within
+ * 100 ms of the last peak bar.
  */
 export function createNativeCapture({
   onError,
@@ -86,8 +120,10 @@ export function createNativeCapture({
   createClient = createNativeRecorder,
 } = {}) {
   let phase = 'idle'
-  let accumulated = 0
-  let segmentStart = 0
+  let recordedMs = 0
+  let recordedAt = 0
+  let haveRecorded = false
+  let lastBarEndMs = 0
   let cancelStart = false
   let stopWait = null
   let pendingError = false
@@ -101,6 +137,7 @@ export function createNativeCapture({
     },
     onPeaks(payload) {
       if (!levelsOpen()) return
+      noteBarEnd(peakBatchEndMs(payload))
       onPeaks?.(payload)
     },
     onState(payload) {
@@ -118,9 +155,35 @@ export function createNativeCapture({
     return phase === 'starting' || phase === 'recording' || phase === 'stopping'
   }
 
+  function noteBarEnd(endMs) {
+    const end = Math.max(0, Number(endMs) || 0)
+    if (!(end > lastBarEndMs)) return
+    const shown = elapsedMs()
+    lastBarEndMs = end
+    recordedMs = Math.min(Math.max(end, shown), end + MAX_PLAYHEAD_LEAD_MS)
+    recordedAt = now()
+    haveRecorded = true
+  }
+
+  function noteStatusDuration(ms) {
+    const value = Math.max(0, Number(ms) || 0)
+    if (value <= 0 && !haveRecorded) return
+    haveRecorded = true
+    if (value > recordedMs) {
+      recordedMs = value
+      recordedAt = now()
+    }
+  }
+
   function elapsedMs() {
-    if (phase === 'recording') return accumulated + (now() - segmentStart)
-    return accumulated
+    if (!haveRecorded) return 0
+    if (phase !== 'recording') return recordedMs
+    return nativePlayheadMs({
+      haveRecorded: true,
+      recordedMs,
+      sinceMs: Math.max(0, now() - recordedAt),
+      lastBarEndMs,
+    })
   }
 
   function enqueue(task) {
@@ -147,7 +210,10 @@ export function createNativeCapture({
     phase = 'starting'
     cancelStart = false
     pendingError = false
-    accumulated = 0
+    recordedMs = 0
+    recordedAt = 0
+    haveRecorded = false
+    lastBarEndMs = 0
     armWave?.(NATIVE_PEAK_STEP_MS)
     try {
       const textKey = getTextKey?.() || ''
@@ -166,7 +232,6 @@ export function createNativeCapture({
         await native.cancel().catch(() => {})
         return { started: false, cancelled: true }
       }
-      segmentStart = now()
       phase = 'recording'
       if (pendingError) {
         pendingError = false
@@ -183,7 +248,8 @@ export function createNativeCapture({
 
   function pause() {
     if (phase !== 'recording') return false
-    accumulated += now() - segmentStart
+    recordedMs = elapsedMs()
+    recordedAt = now()
     phase = 'paused'
     enqueue(async () => {
       try {
@@ -197,7 +263,7 @@ export function createNativeCapture({
 
   function resume() {
     if (phase !== 'paused') return false
-    segmentStart = now()
+    recordedAt = now()
     phase = 'recording'
     enqueue(async () => {
       try {
@@ -227,25 +293,21 @@ export function createNativeCapture({
 
   function restoreOptimistic(expecting) {
     if (expecting === 'paused') {
-      segmentStart = now()
+      recordedAt = now()
       phase = 'recording'
       return
     }
-    accumulated += now() - segmentStart
+    recordedMs = elapsedMs()
+    recordedAt = now()
     phase = 'paused'
   }
 
   function applyStatus(status) {
     if (phase === 'idle' || phase === 'stopping' || phase === 'starting') return
-    if (status.state === 'paused') {
-      accumulated = Number(status.durationMs) || 0
-      phase = 'paused'
-      return
-    }
-    if (status.state === 'recording') {
-      accumulated = Number(status.durationMs) || 0
-      segmentStart = now()
-      phase = 'recording'
+    if (status.state === 'paused' || status.state === 'recording') {
+      noteStatusDuration(status.durationMs)
+      phase = status.state === 'paused' ? 'paused' : 'recording'
+      if (phase === 'recording') recordedAt = now()
       return
     }
     if (status.state === 'idle') {
@@ -299,7 +361,8 @@ export function createNativeCapture({
       onStopped?.(null)
       return null
     }
-    accumulated = elapsedMs()
+    recordedMs = elapsedMs()
+    recordedAt = now()
     phase = 'stopping'
     let stopped = null
     try {

@@ -962,7 +962,9 @@ mod tests {
     assert_eq!(meters.len(), 2);
     assert_eq!(peaks.len(), 2);
     assert_eq!(peaks[0].start_index, 0);
+    assert_eq!(peaks[0].end_ms, 40);
     assert_eq!(peaks[1].start_index, 2);
+    assert_eq!(peaks[1].end_ms, 100);
     assert!(emit.errors.lock().unwrap().is_empty());
   }
 

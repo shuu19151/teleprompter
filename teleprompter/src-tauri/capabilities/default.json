@@ -25,6 +25,10 @@
     "allow-takes-list",
     "allow-takes-delete",
     "allow-takes-read",
+    "allow-texts-list",
+    "allow-texts-read",
+    "allow-texts-write",
+    "allow-texts-delete",
     {
       "identifier": "fs:allow-mkdir",
       "allow": [{ "path": "$DOCUMENT/Teleprompter" }]

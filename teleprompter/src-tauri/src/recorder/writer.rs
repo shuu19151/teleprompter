@@ -8,9 +8,11 @@
 //! That keeps the ring from filling, so the callback stays non-blocking. Those
 //! discarded frames are not ring overflows. Meter and peak events stop for the
 //! pause; the partial window is flushed into the segment being closed. Resume
-//! opens a new file and does not trim leading zeros. That trim is only for the
-//! silence a device can emit when the stream first opens. Samples that are
+//! opens a new file and does not trim the start. That trim is only for the
+//! silence a device can emit when the stream first opens: exact zeros and
+//! samples too quiet to paint a bar, for at most 1.5 s. Samples that are
 //! kept then pass through the voice chain before they are written or metered.
+//! Peak index 0 is the first kept sample, which is also time zero for the clock.
 //!
 //! Every `rotate_after` output frames the open file is finalized and the next
 //! sample opens `seg-NNN.wav`. That work stays on this thread. The same thread
@@ -30,7 +32,7 @@ use rtrb::{Consumer, PopError};
 use rubato::{Fft, FixedSync, Indexing, Resampler};
 
 use super::events::{ErrorEvent, RecorderEmit, notify_device_lost};
-use super::levels::{LevelTick, LevelWindow};
+use super::levels::{self, LevelTick, LevelWindow};
 use super::m4a::{AacStream, EncodedAac};
 use super::session::{self, SessionStore};
 use super::voice::VoiceChain;
@@ -685,23 +687,54 @@ fn publish_fault(
   notify_device_lost(emit, loss_notified, device_id);
 }
 
-/// Keep a sample unless it is an exact zero at the very start of the take.
-/// Later zeros, including a zero that follows speech, are kept.
-fn accept_leading(drop_leading: &mut bool, sample: f32) -> bool {
-  if !*drop_leading {
-    return true;
+/// Drops the device's startup silence until a sample that can paint a bar,
+/// or until 1.5 s have passed. Later silence, including a pause in speech, is kept.
+struct LeadGate {
+  active: bool,
+  left: u64,
+  floor: f32,
+}
+
+impl LeadGate {
+  fn new(sample_rate: u32) -> Self {
+    Self {
+      active: true,
+      left: u64::try_from(levels::frames_for_ms(sample_rate, levels::LEADING_TIMEOUT_MS))
+        .unwrap_or(u64::MAX),
+      floor: levels::leading_sample_floor(),
+    }
   }
-  if sample == 0.0 {
-    return false;
+
+  fn inactive() -> Self {
+    Self {
+      active: false,
+      left: 0,
+      floor: 0.0,
+    }
   }
-  *drop_leading = false;
-  true
+
+  /// `true` when `sample` belongs in the take. The first kept sample is time zero.
+  fn admit(&mut self, sample: f32) -> bool {
+    if !self.active {
+      return true;
+    }
+    if sample.is_finite() && sample.abs() >= self.floor {
+      self.active = false;
+      return true;
+    }
+    if self.left == 0 {
+      self.active = false;
+      return true;
+    }
+    self.left -= 1;
+    false
+  }
 }
 
 struct OutputStage {
-  /// Exact digital zeros before the first real sample. The device can deliver
-  /// these for most of a second after the stream opens.
-  drop_leading: bool,
+  /// Startup silence before the first audible sample. The device can deliver
+  /// this for most of a second after the stream opens.
+  lead: LeadGate,
   kind: OutputKind,
 }
 
@@ -713,46 +746,43 @@ enum OutputKind {
 impl OutputStage {
   fn dormant() -> Self {
     Self {
-      drop_leading: false,
+      lead: LeadGate::inactive(),
       kind: OutputKind::Direct,
     }
   }
 
   fn new(capture_rate: u32) -> Result<Self, RecorderError> {
+    let rate = if capture_rate == 0 {
+      OUTPUT_SAMPLE_RATE
+    } else {
+      capture_rate
+    };
     let kind = if capture_rate == OUTPUT_SAMPLE_RATE || capture_rate == 0 {
       OutputKind::Direct
     } else {
       OutputKind::Resample(StreamResampler::new(capture_rate)?)
     };
     Ok(Self {
-      drop_leading: true,
+      lead: LeadGate::new(rate),
       kind,
     })
   }
 
-  /// A later segment. The stream is already open, so exact zeros are real
-  /// silence and stay in the file. A fresh resampler still trims its warmup.
+  /// A later segment. The stream is already open, so silence is real and stays
+  /// in the file. A fresh resampler still trims its warmup.
   fn continuing(capture_rate: u32) -> Result<Self, RecorderError> {
     let mut stage = Self::new(capture_rate)?;
-    stage.drop_leading = false;
-    if let OutputKind::Resample(resampler) = &mut stage.kind {
-      resampler.drop_leading = false;
-    }
+    stage.lead = LeadGate::inactive();
     Ok(stage)
   }
 
-  /// Index of the first sample that should be written. Leading exact zeros
-  /// stay out of the WAV and out of the resampler.
+  /// Index of the first sample that should be written. Leading silence stays
+  /// out of the WAV and out of the resampler. The first kept sample is the
+  /// origin of the peak index and of the recording clock.
   fn leading_skip(&mut self, samples: &[f32]) -> usize {
-    if !self.drop_leading {
-      return 0;
-    }
     let mut start = 0;
-    while start < samples.len() && samples[start] == 0.0 {
+    while start < samples.len() && !self.lead.admit(samples[start]) {
       start += 1;
-    }
-    if start < samples.len() {
-      self.drop_leading = false;
     }
     start
   }
@@ -798,7 +828,6 @@ struct StreamResampler {
   written_frames: u64,
   input_rate: u32,
   trim_left: usize,
-  drop_leading: bool,
   in_scratch: Vec<f32>,
   out_scratch: Vec<f32>,
 }
@@ -823,7 +852,6 @@ impl StreamResampler {
       written_frames: 0,
       input_rate: capture_rate,
       trim_left,
-      drop_leading: true,
       in_scratch: vec![0.0; in_len],
       out_scratch: vec![0.0; out_len],
     })
@@ -925,9 +953,6 @@ impl StreamResampler {
     for sample in &self.out_scratch[start..frames] {
       if cap.is_some_and(|limit| self.written_frames >= limit) {
         break;
-      }
-      if !accept_leading(&mut self.drop_leading, *sample) {
-        continue;
       }
       write(*sample)?;
       self.written_frames += 1;
@@ -1327,15 +1352,93 @@ mod tests {
   }
 
   #[test]
-  fn accept_leading_drops_only_the_opening_zeros() {
-    let mut dropping = true;
-    assert!(!accept_leading(&mut dropping, 0.0));
-    assert!(!accept_leading(&mut dropping, -0.0));
-    assert!(dropping);
-    assert!(accept_leading(&mut dropping, 0.25));
-    assert!(!dropping);
-    assert!(accept_leading(&mut dropping, 0.0));
-    assert!(accept_leading(&mut dropping, -0.5));
+  fn the_lead_gate_drops_opening_silence_until_a_paintable_sample() {
+    let mut gate = LeadGate::new(48_000);
+    let floor = levels::leading_sample_floor();
+    assert!(floor > 0.0 && floor < 0.02);
+    assert!(!gate.admit(0.0));
+    assert!(!gate.admit(-0.0));
+    assert!(!gate.admit(floor * 0.5));
+    assert!(gate.active);
+    assert!(gate.admit(0.25));
+    assert!(!gate.active);
+    assert!(gate.admit(0.0));
+    assert!(gate.admit(-0.5));
+    assert!(gate.admit(floor * 0.25));
+  }
+
+  #[test]
+  fn the_lead_gate_keeps_silence_after_the_page_timeout() {
+    let mut gate = LeadGate::new(48_000);
+    let budget = levels::frames_for_ms(48_000, levels::LEADING_TIMEOUT_MS) as u64;
+    assert_eq!(budget, 72_000);
+    for _ in 0..budget {
+      assert!(!gate.admit(0.0));
+    }
+    assert!(gate.admit(0.0));
+    assert!(!gate.active);
+    assert!(gate.admit(0.0));
+  }
+
+  #[test]
+  fn quiet_preroll_is_not_a_peak_and_the_tone_starts_at_index_zero() {
+    let preroll = vec![0.001_f32; 19_200];
+    let tone: Vec<f32> = (0..2_000)
+      .map(|index| {
+        let step = std::f32::consts::TAU * 1_000.0 / 48_000.0;
+        (step * index as f32 + 0.4).sin() * 0.5
+      })
+      .collect();
+    assert!(tone[0].abs() > levels::leading_sample_floor());
+    let mut input = preroll;
+    input.extend(tone);
+    let path = temp_wav("lead-floor");
+    let (mut producer, consumer) = RingBuffer::new(input.len() + 8);
+    for sample in &input {
+      producer.push(*sample).unwrap();
+    }
+    drop(producer);
+    let emit = Arc::new(MemoryEmit::new());
+    let handle = spawn_writer(
+      consumer,
+      std::sync::Arc::new(AtomicU64::new(0)),
+      path.clone(),
+      48_000,
+      std::sync::Arc::new(AtomicU64::new(0)),
+      Arc::clone(&emit) as Arc<dyn RecorderEmit>,
+      Arc::new(AtomicBool::new(false)),
+      "test-input".into(),
+      Arc::new(AtomicBool::new(false)),
+      u64::MAX,
+      None,
+    )
+    .unwrap();
+    let done = handle.finish().unwrap();
+    assert_eq!(done.frames, 2_000);
+    assert!(!done.peaks.is_empty());
+    assert!(
+      done.peaks[0] > 0.05,
+      "first peak {} should be the tone, not the preroll",
+      done.peaks[0]
+    );
+    let peaks = emit.peaks.lock().unwrap();
+    assert!(!peaks.is_empty());
+    assert_eq!(peaks[0].start_index, 0);
+    assert_eq!(
+      peaks[0].end_ms,
+      levels::peak_end_ms(0, peaks[0].values.len())
+    );
+    let last = peaks.last().unwrap();
+    let bar_end = last.end_ms;
+    let recorded = super::session::duration_ms(done.frames);
+    let lead = bar_end
+      .saturating_sub(recorded)
+      .max(recorded.saturating_sub(bar_end));
+    assert!(
+      lead <= 100,
+      "peak end {bar_end} ms vs recorded {recorded} ms"
+    );
+    let _ = std::fs::remove_file(&path);
   }
 
   #[test]
@@ -1385,8 +1488,10 @@ mod tests {
     assert!(meters[0].peak > 0.0);
     assert_eq!(peaks.len(), 2);
     assert_eq!(peaks[0].start_index, 0);
+    assert_eq!(peaks[0].end_ms, 40);
     assert_eq!(peaks[0].values.len(), 2);
     assert_eq!(peaks[1].start_index, 2);
+    assert_eq!(peaks[1].end_ms, 100);
     assert_eq!(peaks[1].values.len(), 3);
     let errors = emit.errors.lock().unwrap();
     assert_eq!(errors.len(), 1);

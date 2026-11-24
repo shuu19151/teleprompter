@@ -1,5 +1,6 @@
 mod recorder;
 mod takes;
+mod texts;
 
 #[cfg(windows)]
 use tauri::Manager;
@@ -24,6 +25,10 @@ pub fn run() {
       takes::takes_list,
       takes::takes_delete,
       takes::takes_read,
+      texts::texts_list,
+      texts::texts_read,
+      texts::texts_write,
+      texts::texts_delete,
     ])
     // The page origin is http://tauri.localhost. Allowing the microphone here
     // answers getUserMedia before WebView2 draws its site permission prompt.
@@ -35,6 +40,7 @@ pub fn run() {
     .setup(|app| {
       recorder::spawn_device_watch(app.handle().clone());
       takes::spawn_takes_watch(app.handle().clone());
+      texts::spawn_texts_watch(app.handle().clone());
       if cfg!(debug_assertions) {
         app.handle().plugin(
           tauri_plugin_log::Builder::default()

@@ -50,10 +50,13 @@ pub struct MeterEvent {
 }
 
 /// `recorder://peaks`. `values` holds one bar per 20 ms, starting at `start_index`.
+/// `end_ms` is the recorded time at the end of this batch. Zero is the first
+/// sample the writer kept.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeaksEvent {
   pub start_index: u64,
+  pub end_ms: u64,
   pub values: Vec<f32>,
 }
 
@@ -148,10 +151,12 @@ mod tests {
 
     let peaks = serde_json::to_value(PeaksEvent {
       start_index: 3,
+      end_ms: 100,
       values: vec![0.5, 0.25],
     })
     .unwrap();
     assert_eq!(peaks["startIndex"], 3);
+    assert_eq!(peaks["endMs"], 100);
     assert_eq!(peaks["values"][1], 0.25);
 
     let state = serde_json::to_value(StateNotice {
