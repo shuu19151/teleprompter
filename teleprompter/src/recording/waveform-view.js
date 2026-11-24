@@ -19,6 +19,15 @@ import {
 
 const PEAK_RING_SIZE = 16384
 
+/** Center of peak `index` on the recording clock. Index 0 is the first kept sample. */
+export function recordingBarTimeSec(index, stepSec) {
+  const step = Number(stepSec)
+  if (!(step > 0)) return 0
+  const i = Number(index)
+  if (!Number.isFinite(i) || i < 0) return 0
+  return (i + 0.5) * step
+}
+
 export function clampUnit(value) {
   const number = Number(value)
   if (!Number.isFinite(number) || number <= 0) return 0
@@ -261,7 +270,7 @@ export function createWaveformView({ getAnalyser, resumeAudio, getElapsedMs, get
       step: sampleStepMs / 1000,
     })
     for (let i = first; i < peakCount; i += 1) {
-      const t = (i + 0.5) * step
+      const t = recordingBarTimeSec(i, step)
       const x = waveX(centerX, t, nowSec, pxPerSec)
       if (x < -4) continue
       if (x > centerX) break
@@ -294,7 +303,7 @@ export function createWaveformView({ getAnalyser, resumeAudio, getElapsedMs, get
       length: peaks.length,
     })
     for (let i = first; i < last; i += 1) {
-      const t = (origin + i + 0.5) * step
+      const t = recordingBarTimeSec(origin + i, step)
       if (t < 0) continue
       const x = waveX(centerX, t, nowSec, pxPerSec)
       if (x < -4 || x > width + 4) continue

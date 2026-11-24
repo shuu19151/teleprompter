@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { applyPeakBatch, exportPeakSlice, meterLevel, nextWaveColors, playbackDurationSec } from '../src/recording/waveform-view.js'
+import { applyPeakBatch, exportPeakSlice, meterLevel, nextWaveColors, playbackDurationSec, recordingBarTimeSec } from '../src/recording/waveform-view.js'
 
 test('peak export keeps the newest samples once the ring wraps', () => {
   const ring = new Float32Array(4)
@@ -40,6 +40,18 @@ test('a meter uses the same peak and rms mix as the live waveform', () => {
   assert.equal(meterLevel({ peak: 0.2, rms: 0.1 }), 0.25)
   assert.equal(meterLevel({ peak: 1.4, rms: 0.2, clipped: true }), 1)
   assert.equal(meterLevel({ peak: Number.NaN, rms: 0.1 }), 0.25)
+})
+
+test('the first native bar is the kept-sample onset, one 20 ms bin in', () => {
+  assert.equal(recordingBarTimeSec(0, 0.02), 0.01)
+  assert.equal(recordingBarTimeSec(1, 0.02), 0.03)
+  assert.equal(recordingBarTimeSec(16, 0.02), 0.33)
+  assert.equal(recordingBarTimeSec(0, 0), 0)
+  assert.equal(recordingBarTimeSec(-1, 0.02), 0)
+  // Dropped leading silence is not part of the index. Two seconds of it
+  // must not push the first bar to 2.00s or to the 0.40s ruler tick.
+  assert.ok(recordingBarTimeSec(0, 0.02) < 0.02)
+  assert.ok(Math.abs(recordingBarTimeSec(0, 0.02) - 0.4) > 0.2)
 })
 
 test('native peak batches land on their start index', () => {
