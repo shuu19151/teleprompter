@@ -130,7 +130,7 @@ export function createImportDialog(deps) {
       showDialogError(READ_IMPORT_MESSAGE)
       return
     }
-    const result = deps.addImport(text, { fileName: file.name, markdown: isMarkdownName(file.name) })
+    const result = await deps.addImport(text, { fileName: file.name, markdown: isMarkdownName(file.name) })
     if (result.error) {
       openImportDialog()
       showDialogError(result.error)
@@ -178,19 +178,28 @@ export function createImportDialog(deps) {
       }
     })
     document.querySelector('#import-cancel').addEventListener('click', () => dialog.close())
+    let saving = false
     importForm.addEventListener('submit', (event) => {
       event.preventDefault()
+      if (saving) return
+      saving = true
       const title = document.querySelector('#import-name')?.value ?? ''
       const body = document.querySelector('#import-body')?.value ?? ''
       const id = editingId
       const fileMeta = { fileName: importFileName, markdown: importMarkdown }
-      const result = id ? deps.updateImport(id, title, body, fileMeta) : deps.addImport(body, { title, ...fileMeta })
-      if (result.error) {
-        showDialogError(result.error)
-        return
-      }
-      dialog.close()
-      if (!id) deps.selectImport(result.item.id)
+      void (async () => {
+        try {
+          const result = id ? await deps.updateImport(id, title, body, fileMeta) : await deps.addImport(body, { title, ...fileMeta })
+          if (result?.error) {
+            showDialogError(result.error)
+            return
+          }
+          dialog.close()
+          if (!id) deps.selectImport(result.item.id)
+        } finally {
+          saving = false
+        }
+      })()
     })
     document.querySelector('#import-file')?.addEventListener('change', async (event) => {
       const input = event.target

@@ -173,6 +173,7 @@ test('import reading counts words and keeps at least one minute', () => {
   const counted = asImportEssay({ id: 'e', title: 'One two', body: 'three', createdAt: 1 }, 0)
   assert.equal(counted.words, 3)
   assert.equal(counted.minutes, 1)
+  assert.equal(asImportEssay({ id: 'import-9', code: 'U4', title: 'T', body: 'b', createdAt: 't' }, 0).code, 'U4')
 })
 
 test('open text key and essay file lookup', () => {

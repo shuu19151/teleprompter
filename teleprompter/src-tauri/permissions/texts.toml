@@ -1,0 +1,19 @@
+[[permission]]
+identifier = "allow-texts-list"
+description = "Enables the texts_list command."
+commands.allow = ["texts_list"]
+
+[[permission]]
+identifier = "allow-texts-read"
+description = "Enables the texts_read command."
+commands.allow = ["texts_read"]
+
+[[permission]]
+identifier = "allow-texts-write"
+description = "Enables the texts_write command."
+commands.allow = ["texts_write"]
+
+[[permission]]
+identifier = "allow-texts-delete"
+description = "Enables the texts_delete command."
+commands.allow = ["texts_delete"]
