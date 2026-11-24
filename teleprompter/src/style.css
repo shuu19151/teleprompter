@@ -771,7 +771,9 @@ html.is-reading-fullscreen .mic-row {
 .row-menu-item:hover,
 .row-menu-item:focus-visible {
   outline: none;
-  background: var(--paper-2);
+  background: color-mix(in srgb, var(--rust) 16%, var(--card));
+  color: var(--ink);
+  box-shadow: inset 3px 0 0 var(--rust);
 }
 
 .row-menu-item.danger:hover,
