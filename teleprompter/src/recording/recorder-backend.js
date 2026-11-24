@@ -67,10 +67,10 @@ export function nativeStartError(error) {
 }
 
 /**
- * Native take. Stop encodes the session to an M4A file in Documents and
- * returns that path. The page does not build a second blob. Pause and resume
- * use the same button states as the web capture. The clock counts recorded
- * time only.
+ * Native take. The writer encodes AAC while recording. Stop muxes that audio
+ * to an M4A file in Documents and returns the path plus the peaks it already
+ * folded. The page does not build a second blob. Pause and resume use the
+ * same button states as the web capture. The clock counts recorded time only.
  */
 export function createNativeCapture({
   onError,
@@ -270,6 +270,7 @@ export function createNativeCapture({
       durationMs: Number(stopped.durationMs) || 0,
       mimeType: 'audio/mp4',
       extension: 'm4a',
+      peaks: Array.isArray(stopped.peaks) ? stopped.peaks : [],
     }
   }
 

@@ -2,9 +2,11 @@
 //!
 //! Startup scans `.sessions/` for a take that is still `recording` or
 //! `paused`. The open segment's header is rebuilt from the bytes on disk.
-//! Save encodes the segments to one AAC-LC M4A take under Documents/Teleprompter
-//! and deletes the session only after that file and its sidecar have been
-//! checked. Discard deletes the session folder and does not write a take.
+//! Save reads those segments and encodes them, because a killed process kept
+//! no AAC frames. A normal stop does not come through here: it muxes the
+//! frames the writer already encoded and reuses that writer's peaks.
+//! Either path deletes the session only after the final m4a passes one light
+//! check. Discard deletes the session folder and does not write a take.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -39,9 +41,38 @@ pub struct SavedTake {
   pub duration_ms: u64,
 }
 
-pub fn save_session(directory: &Path, takes_dir: &Path) -> Result<SavedTake, RecorderError> {
+/// Mux AAC frames that were encoded while recording and write the take.
+///
+/// The WAV segments are not read. `peaks` are the bars the writer already
+/// folded; they are downsampled into the sidecar.
+pub fn save_streamed(
+  directory: &Path,
+  takes_dir: &Path,
+  encoded: &m4a::EncodedAac,
+  peaks: &[f32],
+) -> Result<SavedTake, RecorderError> {
   let record = read_session_file(directory)?;
-  save_take(takes_dir, directory, record)
+  let bytes = m4a::mux_encoded(encoded)?;
+  let peaks = downsample(peaks, MAX_PEAKS);
+  publish_take(
+    takes_dir,
+    directory,
+    record,
+    &bytes,
+    encoded.pcm_frames,
+    peaks,
+  )
+}
+
+#[cfg(test)]
+thread_local! {
+  static PCM_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Segment re-reads on this thread. A streamed stop must leave this at zero.
+#[cfg(test)]
+pub fn pcm_reads() -> u64 {
+  PCM_READS.with(|cell| cell.get())
 }
 
 const SIDECAR_VERSION: u32 = 1;
@@ -163,7 +194,7 @@ fn measured_duration(directory: &Path, record: &SessionRecord) -> u64 {
 fn save_take(
   takes_dir: &Path,
   directory: &Path,
-  mut record: SessionRecord,
+  record: SessionRecord,
 ) -> Result<SavedTake, RecorderError> {
   fs::create_dir_all(takes_dir).map_err(|error| {
     RecorderError::Session(format!("could not create {}: {error}", takes_dir.display()))
@@ -182,18 +213,25 @@ fn save_take(
     Ok(encoded) => encoded,
     Err(error) => return Err(error),
   };
-  if let Err(error) = m4a::verify_m4a(&encoded, pcm.len() as u64) {
-    return Err(error);
-  }
   let frames = pcm.len() as u64;
+  publish_take(takes_dir, directory, record, &encoded, frames, peaks)
+}
+
+fn publish_take(
+  takes_dir: &Path,
+  directory: &Path,
+  mut record: SessionRecord,
+  encoded: &[u8],
+  frames: u64,
+  peaks: Vec<f32>,
+) -> Result<SavedTake, RecorderError> {
+  fs::create_dir_all(takes_dir).map_err(|error| {
+    RecorderError::Session(format!("could not create {}: {error}", takes_dir.display()))
+  })?;
   let stem = take_stem(&record);
   let name = unique_take_name(takes_dir, &stem)?;
   let partial = takes_dir.join(format!(".{name}.partial"));
-  if let Err(error) = write_bytes(&partial, &encoded) {
-    let _ = fs::remove_file(&partial);
-    return Err(error);
-  }
-  if let Err(error) = verify_saved(&partial, frames) {
+  if let Err(error) = write_bytes(&partial, encoded) {
     let _ = fs::remove_file(&partial);
     return Err(error);
   }
@@ -229,7 +267,13 @@ fn save_take(
       sidecar_path.display()
     )));
   }
-  verify_saved(&audio_path, frames)?;
+  // One check, on the final file. A failure keeps the session so recovery can
+  // encode the WAV segments, and removes the take that did not check out.
+  if let Err(error) = verify_saved(&audio_path, frames) {
+    let _ = fs::remove_file(&audio_path);
+    let _ = fs::remove_file(&sidecar_path);
+    return Err(error);
+  }
   if !sidecar_path.is_file() {
     return Err(RecorderError::Write(format!(
       "could not save {}",
@@ -257,6 +301,8 @@ fn save_take(
 }
 
 fn read_pcm(directory: &Path, names: &[String]) -> Result<(Vec<i16>, Vec<f32>), RecorderError> {
+  #[cfg(test)]
+  PCM_READS.with(|cell| cell.set(cell.get().saturating_add(1)));
   let mut pcm = Vec::new();
   let mut peaks = PeakFold::default();
   for name in names {
@@ -308,7 +354,7 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), RecorderError> {
 fn verify_saved(path: &Path, frames: u64) -> Result<(), RecorderError> {
   let bytes = fs::read(path)
     .map_err(|error| RecorderError::Write(format!("could not read {}: {error}", path.display())))?;
-  m4a::verify_m4a(&bytes, frames)?;
+  m4a::verify_m4a_light(&bytes, frames)?;
   Ok(())
 }
 
@@ -620,6 +666,42 @@ mod tests {
   }
 
   #[test]
+  fn streamed_save_does_not_read_segments() {
+    let root = scratch("streamed");
+    let id = "55555555-5555-4555-8555-555555555555";
+    let dir = root.sessions().join(id);
+    fs::create_dir_all(&dir).unwrap();
+    let record = SessionRecord::new(
+      "2026-11-23T17:04:05.000Z".into(),
+      "E01".into(),
+      "E01".into(),
+      "Streamed".into(),
+      "Mic".into(),
+      vec![session::segment_name(0)],
+    );
+    write_session_atomic(&dir, &record).unwrap();
+    fs::write(dir.join(session::segment_name(0)), b"not a wav").unwrap();
+    let pcm = sine_i16(48_000);
+    let mut stream = m4a::AacStream::new().unwrap();
+    stream.push(&pcm).unwrap();
+    let encoded = stream.finish().unwrap();
+    let reads = pcm_reads();
+    let decodes = m4a::full_decodes();
+    let saved = save_streamed(&dir, root.takes(), &encoded, &[0.2, 0.4]).unwrap();
+    assert_eq!(pcm_reads(), reads);
+    assert_eq!(m4a::full_decodes(), decodes);
+    assert!(!dir.exists());
+    let bytes = fs::read(&saved.path).unwrap();
+    let info = m4a::verify_m4a(&bytes, pcm.len() as u64).unwrap();
+    assert_eq!(info.major_brand, *b"M4A ");
+    assert!(info.faststart);
+    assert!(info.presented_samples.abs_diff(pcm.len() as u64) <= m4a::DURATION_TOLERANCE);
+    let sidecar: serde_json::Value =
+      serde_json::from_slice(&fs::read(saved.path.with_extension("json")).unwrap()).unwrap();
+    assert_eq!(sidecar["peaks"].as_array().unwrap().len(), 2);
+  }
+
+  #[test]
   fn a_second_save_in_the_same_minute_gets_a_suffix() {
     let root = scratch("clash");
     let id = "44444444-4444-4444-8444-444444444444";
@@ -723,6 +805,13 @@ mod tests {
         let _ = fs::remove_dir_all(parent);
       }
     }
+  }
+
+  fn sine_i16(frames: usize) -> Vec<i16> {
+    let step = std::f32::consts::TAU * 440.0 / OUTPUT_SAMPLE_RATE as f32;
+    (0..frames)
+      .map(|index| ((step * index as f32).sin() * 0.4 * i16::MAX as f32) as i16)
+      .collect()
   }
 
   fn scratch(label: &str) -> Scratch {

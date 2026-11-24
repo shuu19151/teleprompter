@@ -1,10 +1,13 @@
 //! AAC-LC in a faststart M4A file.
 //!
-//! Fraunhofer FDK AAC encodes mono 48 kHz PCM at 96 kbps. The container is
-//! written here, not by ffmpeg: `ftyp` major brand `M4A `, `moov` before
-//! `mdat`, and an edit list so the duration stays on the recorded length
-//! instead of the encoder delay. The license notice ships in
-//! `licenses/FDK-AAC-NOTICE`.
+//! Fraunhofer FDK AAC encodes mono 48 kHz PCM at 96 kbps. A live take feeds
+//! [`AacStream`] on the writer thread while the WAV segments are written, then
+//! [`mux_encoded`] builds the container when the take stops. [`encode_aac_lc`]
+//! still encodes a whole buffer in one pass for crash recovery, which has no
+//! streamed frames. The container is written here, not by ffmpeg: `ftyp`
+//! major brand `M4A `, `moov` before `mdat`, and an edit list so the duration
+//! stays on the recorded length instead of the encoder delay. The license
+//! notice ships in `licenses/FDK-AAC-NOTICE`.
 
 use fdk_aac::dec::{Decoder, DecoderError, Transport as DecTransport};
 use fdk_aac::enc::{AudioObjectType, BitRate, ChannelMode, Encoder, EncoderParams, Transport};
@@ -29,6 +32,179 @@ pub struct M4aInfo {
   pub media_samples: u64,
   pub payload_bytes: u64,
   pub avg_bitrate: u32,
+}
+
+/// AAC access units produced while a take was recording.
+///
+/// `pcm_frames` counts samples fed to the encoder, not the delay padding.
+/// `delay` is the priming the edit list skips.
+#[derive(Debug, Clone)]
+pub struct EncodedAac {
+  pub frames: Vec<Vec<u8>>,
+  pub pcm_frames: u64,
+  pub delay: u64,
+  pub asc: Vec<u8>,
+}
+
+impl EncodedAac {
+  pub fn is_empty(&self) -> bool {
+    self.pcm_frames == 0 || self.frames.is_empty()
+  }
+}
+
+/// Incremental AAC-LC encoder.
+///
+/// Push the same PCM the WAV writer stores. A pause is a gap between pushes:
+/// the encoder is not reset, so resume continues the same bitstream. Call
+/// [`AacStream::finish`] once, on the writer thread, when the take stops.
+pub struct AacStream {
+  encoder: Encoder,
+  frame_len: usize,
+  delay: usize,
+  asc: Vec<u8>,
+  packet: Vec<u8>,
+  pending: Vec<i16>,
+  frames: Vec<Vec<u8>>,
+  pcm_frames: u64,
+}
+
+impl AacStream {
+  pub fn new() -> Result<Self, RecorderError> {
+    let (encoder, frame_len, delay, asc, packet) = open_encoder()?;
+    Ok(Self {
+      encoder,
+      frame_len,
+      delay,
+      asc,
+      packet,
+      pending: Vec::with_capacity(frame_len * 2),
+      frames: Vec::new(),
+      pcm_frames: 0,
+    })
+  }
+
+  pub fn push(&mut self, samples: &[i16]) -> Result<(), RecorderError> {
+    if samples.is_empty() {
+      return Ok(());
+    }
+    self.pcm_frames = self.pcm_frames.saturating_add(samples.len() as u64);
+    self.pending.extend_from_slice(samples);
+    self.drain()
+  }
+
+  pub fn push_sample(&mut self, sample: i16) -> Result<(), RecorderError> {
+    self.pcm_frames = self.pcm_frames.saturating_add(1);
+    self.pending.push(sample);
+    if self.pending.len() >= self.frame_len {
+      self.drain()?;
+    }
+    Ok(())
+  }
+
+  fn drain(&mut self) -> Result<(), RecorderError> {
+    while self.pending.len() >= self.frame_len {
+      self.pump()?;
+    }
+    Ok(())
+  }
+
+  /// Encode one access unit from the front of `pending`.
+  ///
+  /// The call is given only one frame. FDK reads `numInSamples` from the
+  /// slice length, and a longer slice would let a one-shot encode see samples
+  /// the live encoder has not received yet.
+  fn pump(&mut self) -> Result<(), RecorderError> {
+    let view_len = self.pending.len().min(self.frame_len);
+    let encoded = self
+      .encoder
+      .encode(&self.pending[..view_len], &mut self.packet)
+      .map_err(|error| RecorderError::Write(format!("could not encode AAC: {error}")))?;
+    if encoded.input_consumed == 0 || encoded.input_consumed > view_len {
+      return Err(RecorderError::Write(
+        "the AAC encoder stopped consuming audio".into(),
+      ));
+    }
+    if encoded.output_size > self.packet.len() {
+      return Err(RecorderError::Write(
+        "the AAC encoder wrote past its output buffer".into(),
+      ));
+    }
+    if encoded.output_size > 0 {
+      self
+        .frames
+        .push(self.packet[..encoded.output_size].to_vec());
+    }
+    self.pending.drain(..encoded.input_consumed);
+    Ok(())
+  }
+
+  pub fn finish(mut self) -> Result<EncodedAac, RecorderError> {
+    if self.pcm_frames > 0 {
+      let total = (self.pcm_frames as usize).saturating_add(self.delay);
+      let padded = total.div_ceil(self.frame_len) * self.frame_len;
+      let extra = padded.saturating_sub(self.pcm_frames as usize);
+      self.pending.extend(std::iter::repeat(0).take(extra));
+      while !self.pending.is_empty() {
+        self.pump()?;
+      }
+    }
+    if self.pcm_frames > 0 && self.frames.is_empty() {
+      return Err(RecorderError::Write(
+        "the AAC encoder produced no audio".into(),
+      ));
+    }
+    Ok(EncodedAac {
+      frames: self.frames,
+      pcm_frames: self.pcm_frames,
+      delay: self.delay as u64,
+      asc: self.asc,
+    })
+  }
+}
+
+fn open_encoder() -> Result<(Encoder, usize, usize, Vec<u8>, Vec<u8>), RecorderError> {
+  let encoder = Encoder::new(EncoderParams {
+    bit_rate: BitRate::Cbr(BITRATE),
+    sample_rate: SAMPLE_RATE,
+    transport: Transport::Raw,
+    channels: ChannelMode::Mono,
+    audio_object_type: AudioObjectType::Mpeg4LowComplexity,
+  })
+  .map_err(|error| RecorderError::Write(format!("could not start the AAC encoder: {error}")))?;
+  let info = encoder
+    .info()
+    .map_err(|error| RecorderError::Write(format!("could not read the AAC encoder: {error}")))?;
+  let frame_len = info.frameLength as usize;
+  if frame_len == 0 || frame_len as u64 != FRAME_SAMPLES {
+    return Err(RecorderError::Write(format!(
+      "the AAC encoder frame is {frame_len} samples, not {FRAME_SAMPLES}"
+    )));
+  }
+  let delay = info.nDelay as usize;
+  let conf_size = info.confSize as usize;
+  if conf_size == 0 || conf_size > info.confBuf.len() {
+    return Err(RecorderError::Write(
+      "the AAC encoder did not return a config".into(),
+    ));
+  }
+  let asc = info.confBuf[..conf_size].to_vec();
+  if audio_object_type(&asc) != Some(2) {
+    return Err(RecorderError::Write("the AAC encoder is not AAC-LC".into()));
+  }
+  let packet = vec![0u8; info.maxOutBufBytes.max(8192) as usize];
+  Ok((encoder, frame_len, delay, asc, packet))
+}
+
+pub fn mux_encoded(encoded: &EncodedAac) -> Result<Vec<u8>, RecorderError> {
+  if encoded.is_empty() {
+    return Err(RecorderError::Write("there is no audio to encode".into()));
+  }
+  mux_m4a(
+    &encoded.frames,
+    encoded.pcm_frames,
+    encoded.delay,
+    &encoded.asc,
+  )
 }
 
 pub fn encode_aac_lc(pcm: &[i16]) -> Result<Vec<u8>, RecorderError> {
@@ -97,6 +273,24 @@ pub fn encode_aac_lc(pcm: &[i16]) -> Result<Vec<u8>, RecorderError> {
 }
 
 pub fn verify_m4a(bytes: &[u8], pcm_frames: u64) -> Result<M4aInfo, RecorderError> {
+  let info = check_container(bytes, pcm_frames)?;
+  let decoded = decode_payload(bytes)?;
+  check_decoded(&decoded)?;
+  Ok(info)
+}
+
+/// Container parse plus the first and last few access units.
+///
+/// Stop uses this once, on the file that was just renamed into place. It does
+/// not decode the rest of the take.
+pub fn verify_m4a_light(bytes: &[u8], pcm_frames: u64) -> Result<M4aInfo, RecorderError> {
+  let info = check_container(bytes, pcm_frames)?;
+  let decoded = decode_edges(bytes)?;
+  check_decoded(&decoded)?;
+  Ok(info)
+}
+
+fn check_container(bytes: &[u8], pcm_frames: u64) -> Result<M4aInfo, RecorderError> {
   if bytes.is_empty() {
     return Err(RecorderError::Write("the m4a file is empty".into()));
   }
@@ -122,7 +316,10 @@ pub fn verify_m4a(bytes: &[u8], pcm_frames: u64) -> Result<M4aInfo, RecorderErro
       info.presented_samples
     )));
   }
-  let decoded = decode_payload(bytes)?;
+  Ok(info)
+}
+
+fn check_decoded(decoded: &Decoded) -> Result<(), RecorderError> {
   if decoded.samples == 0 {
     return Err(RecorderError::Write("the m4a could not be decoded".into()));
   }
@@ -131,7 +328,7 @@ pub fn verify_m4a(bytes: &[u8], pcm_frames: u64) -> Result<M4aInfo, RecorderErro
       "the decoded m4a is not 48 kHz mono".into(),
     ));
   }
-  Ok(info)
+  Ok(())
 }
 
 pub fn inspect(bytes: &[u8]) -> Result<M4aInfo, RecorderError> {
@@ -661,7 +858,27 @@ struct Decoded {
   channels: i32,
 }
 
+/// How many access units [`verify_m4a_light`] decodes at each end of the file.
+const EDGE_FRAMES: usize = 3;
+
+#[cfg(test)]
+thread_local! {
+  static FULL_DECODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Full-file decodes on this thread. Stop must leave this unchanged.
+#[cfg(test)]
+pub fn full_decodes() -> u64 {
+  FULL_DECODES.with(|cell| cell.get())
+}
+
+fn note_full_decode() {
+  #[cfg(test)]
+  FULL_DECODES.with(|cell| cell.set(cell.get().saturating_add(1)));
+}
+
 fn decode_payload(bytes: &[u8]) -> Result<Decoded, RecorderError> {
+  note_full_decode();
   let top = read_boxes(bytes).map_err(|error| RecorderError::Write(error))?;
   let moov =
     find_box(&top, *b"moov").ok_or_else(|| RecorderError::Write("the m4a has no moov".into()))?;
@@ -669,8 +886,75 @@ fn decode_payload(bytes: &[u8]) -> Result<Decoded, RecorderError> {
     find_box(&top, *b"mdat").ok_or_else(|| RecorderError::Write("the m4a has no mdat".into()))?;
   let frames = frame_bytes(moov.payload, mdat.payload)?;
   let asc = sample_asc(moov.payload)?;
+  decode_frames(&frames, &asc)
+}
+
+fn decode_edges(bytes: &[u8]) -> Result<Decoded, RecorderError> {
+  let top = read_boxes(bytes).map_err(|error| RecorderError::Write(error))?;
+  let moov =
+    find_box(&top, *b"moov").ok_or_else(|| RecorderError::Write("the m4a has no moov".into()))?;
+  let mdat =
+    find_box(&top, *b"mdat").ok_or_else(|| RecorderError::Write("the m4a has no mdat".into()))?;
+  let sizes = sample_sizes(moov.payload)?;
+  if sizes.is_empty() {
+    return Err(RecorderError::Write("the m4a could not be decoded".into()));
+  }
+  let asc = sample_asc(moov.payload)?;
+  let head_count = EDGE_FRAMES.min(sizes.len());
+  let head = decode_range(mdat.payload, &sizes, 0, head_count, &asc)?;
+  check_decoded(&head)?;
+  if sizes.len() > head_count {
+    let tail_count = EDGE_FRAMES.min(sizes.len());
+    let start = sizes.len() - tail_count;
+    if start >= head_count {
+      let tail = decode_range(mdat.payload, &sizes, start, tail_count, &asc)?;
+      check_decoded(&tail)?;
+    }
+  }
+  Ok(head)
+}
+
+fn decode_range(
+  mdat: &[u8],
+  sizes: &[usize],
+  start: usize,
+  count: usize,
+  asc: &[u8],
+) -> Result<Decoded, RecorderError> {
+  let frames = frames_at(mdat, sizes, start, count)?;
+  decode_frames(&frames, asc)
+}
+
+fn frames_at(
+  mdat: &[u8],
+  sizes: &[usize],
+  start: usize,
+  count: usize,
+) -> Result<Vec<Vec<u8>>, RecorderError> {
+  let end_index = start.saturating_add(count).min(sizes.len());
+  let mut offset = 0usize;
+  let mut frames = Vec::with_capacity(end_index.saturating_sub(start));
+  for (index, size) in sizes.iter().copied().enumerate() {
+    if index >= end_index {
+      break;
+    }
+    let next = offset.saturating_add(size);
+    if next > mdat.len() {
+      return Err(RecorderError::Write(
+        "the m4a samples run past the file".into(),
+      ));
+    }
+    if index >= start {
+      frames.push(mdat[offset..next].to_vec());
+    }
+    offset = next;
+  }
+  Ok(frames)
+}
+
+fn decode_frames(frames: &[Vec<u8>], asc: &[u8]) -> Result<Decoded, RecorderError> {
   let mut decoder = Decoder::new(DecTransport::Raw);
-  decoder.config_raw(&asc).map_err(|error| {
+  decoder.config_raw(asc).map_err(|error| {
     RecorderError::Write(format!("could not configure the AAC decoder: {error}"))
   })?;
   let mut pcm = vec![0i16; 4096];
@@ -867,5 +1151,63 @@ mod tests {
   #[test]
   fn empty_pcm_is_rejected() {
     assert!(encode_aac_lc(&[]).is_err());
+    let encoded = AacStream::new().unwrap().finish().unwrap();
+    assert!(encoded.is_empty());
+    assert!(mux_encoded(&encoded).is_err());
+  }
+
+  #[test]
+  fn streamed_frames_match_a_one_shot_encode() {
+    let pcm = sine(440.0, SAMPLE_RATE as usize * 3 + 100, 0.35);
+    let once = encode_aac_lc(&pcm).unwrap();
+    for chunk in [1usize, 7, 100, 1024, 3000, 8192] {
+      let streamed = stream_chunks(&pcm, chunk);
+      assert_eq!(
+        streamed, once,
+        "chunk {chunk} produced a different m4a ({} vs {} bytes)",
+        streamed.len(),
+        once.len()
+      );
+    }
+    let info = verify_m4a_light(&once, pcm.len() as u64).unwrap();
+    assert_eq!(info.major_brand, *b"M4A ");
+    assert!(info.faststart);
+    assert_eq!(info.audio_object_type, 2);
+    assert_eq!(info.channels, 1);
+    assert_eq!(info.sample_rate, SAMPLE_RATE);
+    assert!(info.presented_samples.abs_diff(pcm.len() as u64) <= DURATION_TOLERANCE);
+    let full_before = full_decodes();
+    verify_m4a_light(&once, pcm.len() as u64).unwrap();
+    assert_eq!(full_decodes(), full_before);
+  }
+
+  #[test]
+  fn a_pause_does_not_reset_the_stream_encoder() {
+    let pcm = sine(523.25, 20_000, 0.3);
+    let split = 7_777;
+    let mut stream = AacStream::new().unwrap();
+    stream.push(&pcm[..split]).unwrap();
+    // Nothing is fed across the pause. Resume continues the same encoder.
+    stream.push(&pcm[split..]).unwrap();
+    let paused = mux_encoded(&stream.finish().unwrap()).unwrap();
+    let continuous = encode_aac_lc(&pcm).unwrap();
+    assert_eq!(paused, continuous);
+    let info = verify_m4a(&paused, pcm.len() as u64).unwrap();
+    assert!(info.presented_samples.abs_diff(pcm.len() as u64) <= DURATION_TOLERANCE);
+  }
+
+  #[test]
+  fn light_verify_rejects_a_duration_that_is_not_the_recording() {
+    let pcm = sine(440.0, 8_000, 0.2);
+    let bytes = encode_aac_lc(&pcm).unwrap();
+    assert!(verify_m4a_light(&bytes, pcm.len() as u64 + DURATION_TOLERANCE + 1).is_err());
+  }
+
+  fn stream_chunks(pcm: &[i16], chunk: usize) -> Vec<u8> {
+    let mut stream = AacStream::new().unwrap();
+    for piece in pcm.chunks(chunk.max(1)) {
+      stream.push(piece).unwrap();
+    }
+    mux_encoded(&stream.finish().unwrap()).unwrap()
   }
 }
