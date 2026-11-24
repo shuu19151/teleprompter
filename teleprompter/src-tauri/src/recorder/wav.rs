@@ -47,6 +47,7 @@ impl WavFile {
     self.frames
   }
 
+  #[cfg(test)]
   pub fn write_f32(&mut self, sample: f32) -> Result<(), RecorderError> {
     self.write_i16(f32_to_i16(sample))
   }
