@@ -51,7 +51,7 @@ export function asImportEssay(item, index) {
   return {
     kind: 'import',
     id: item.id,
-    code: `U${index + 1}`,
+    code: typeof item.code === 'string' && item.code ? item.code : `U${index + 1}`,
     file: item.id,
     title: item.title,
     body: item.body,

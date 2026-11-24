@@ -31,21 +31,38 @@ import {
   validateImportBody,
   writeImports,
 } from './import-store.js'
+import { nextImportCode, sameImport, textExtension } from './texts-catalog.js'
 
 const ESSAY_KEY = 'teleprompter:essay'
 const QUOTA_IMPORT_MESSAGE = 'Could not save this text because browser storage is full.'
 
-export function createLibrary({ bundledEssays, loadJSON, deps }) {
+function sameImportList(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false
+  for (let i = 0; i < left.length; i += 1) {
+    const a = left[i]
+    const b = right[i]
+    if (!sameImport(a, b)) return false
+    if ((a.code || '') !== (b.code || '')) return false
+    if ((a.extension || '') !== (b.extension || '')) return false
+    if ((a.name || '') !== (b.name || '')) return false
+  }
+  return true
+}
+
+export function createLibrary({ bundledEssays, loadJSON, texts = null, deps }) {
+  const files = Boolean(texts?.enabled)
   let essays = bundledEssays
   let folderHandle = null
   let folderName = ''
   let folderNeedsGesture = false
   let folderBootMessage = ''
-  let imports = loadImports()
+  let imports = files ? [] : loadImports()
   let index = 0
   let kind = 'essay'
   let importId = null
   let query = ''
+  let importsToken = 0
+  let reloadHoldUntil = 0
 
   function current() {
     return currentReading({ kind, index, importId, essays, imports })
@@ -314,7 +331,130 @@ export function createLibrary({ bundledEssays, loadJSON, deps }) {
     selectReading({ kind: 'import', id })
   }
 
-  function addImport(raw, options) {
+  function mergeWithStored(disk) {
+    const stored = loadImports()
+    if (!stored.length) return disk
+    const seen = new Set(disk.map((item) => item.id))
+    const rest = stored.filter((item) => item && !seen.has(item.id))
+    return rest.length ? [...disk, ...rest] : disk
+  }
+
+  function forgetStoredImport(id) {
+    const stored = loadImports()
+    if (!stored.some((item) => item.id === id)) return
+    writeImports(stored.filter((item) => item.id !== id))
+  }
+
+  function holdReloads(ms) {
+    reloadHoldUntil = Math.max(reloadHoldUntil, Date.now() + ms)
+  }
+
+  function reloadsHeld() {
+    return Date.now() < reloadHoldUntil
+  }
+
+  function showOpenImport(prevOpen, nextOpen) {
+    const bodyChanged = prevOpen.body !== nextOpen.body
+    const visibleChanged = bodyChanged || prevOpen.title !== nextOpen.title || (prevOpen.code || '') !== (nextOpen.code || '')
+    if (!visibleChanged) return
+    if (bodyChanged) {
+      const place = deps.capturedReadingPlace()
+      const nextPlace = readingPlaceAfterEdit({
+        bodyChanged,
+        body: nextOpen.body,
+        index: place.index,
+        fraction: place.fraction,
+      })
+      if (!nextPlace) {
+        deps.setAnchor(null)
+        deps.setOffset(0)
+      } else {
+        deps.placeReading(nextPlace.index, nextPlace.fraction)
+      }
+    }
+    deps.renderSheet()
+    deps.saveProgressNow()
+  }
+
+  function closeDeletedImport() {
+    if (essays.length) {
+      select(0)
+      return
+    }
+    void deps.stopRecordingAndSave()
+    kind = 'essay'
+    index = 0
+    importId = null
+    deps.setOffset(0)
+    deps.setAnchor(null)
+    deps.setRunning(false)
+    deps.setWheelLeft(0)
+    deps.stopLoop()
+    deps.renderList()
+    deps.renderSheet()
+    deps.saveProgressNow()
+  }
+
+  function adoptImports(next) {
+    const prev = imports
+    if (sameImportList(prev, next)) return
+    const openId = kind === 'import' ? importId : null
+    imports = next
+    if (openId && !next.some((item) => item.id === openId)) {
+      closeDeletedImport()
+      return
+    }
+    deps.renderList()
+    if (!openId) return
+    const prevOpen = prev.find((item) => item.id === openId)
+    const nextOpen = next.find((item) => item.id === openId)
+    if (prevOpen && nextOpen) showOpenImport(prevOpen, nextOpen)
+  }
+
+  async function reloadImports() {
+    if (!files || reloadsHeld()) return
+    const token = ++importsToken
+    try {
+      const next = mergeWithStored(await texts.list())
+      if (token !== importsToken) return
+      deps.clearImportNote()
+      adoptImports(next)
+    } catch (error) {
+      console.error('Could not load texts.', error)
+      if (token === importsToken) deps.showImportNote('Could not load texts.')
+    }
+  }
+
+  async function bootTexts() {
+    if (!files) return
+    texts.watch(() => {
+      void reloadImports()
+    })
+    try {
+      await texts.migrate()
+    } catch (error) {
+      console.error('Could not migrate texts to Documents.', error)
+    }
+    try {
+      await reloadImports()
+    } catch (error) {
+      console.error('Could not load texts from Documents.', error)
+    }
+    if (!imports.length) {
+      const stored = loadImports()
+      if (stored.length) imports = stored
+    }
+  }
+
+  async function pullImportsAfterWrite() {
+    holdReloads(500)
+    const token = ++importsToken
+    const listed = mergeWithStored(await texts.list())
+    if (token === importsToken) imports = listed
+    return listed
+  }
+
+  async function addImport(raw, options) {
     const parsed = parseImportedText(raw, options)
     if (parsed.error) return parsed
     const item = newImportRecord({
@@ -323,6 +463,25 @@ export function createLibrary({ bundledEssays, loadJSON, deps }) {
       body: parsed.body,
       createdAt: new Date().toISOString(),
     })
+    if (files) {
+      const stored = {
+        ...item,
+        code: nextImportCode(imports),
+        extension: textExtension({ fileName: options?.fileName }),
+      }
+      try {
+        await texts.write(stored)
+        const listed = await pullImportsAfterWrite()
+        const found = listed.find((entry) => entry.id === item.id)
+        if (!found || found.title !== item.title || found.body !== item.body) {
+          return { error: 'Could not save this text.' }
+        }
+        deps.clearImportNote()
+        return { item: found }
+      } catch {
+        return { error: 'Could not save this text.' }
+      }
+    }
     const next = [...imports, item]
     const saved = writeImports(next)
     if (!saved.ok) return { error: saved.quota ? QUOTA_IMPORT_MESSAGE : 'Could not save this text.' }
@@ -331,7 +490,7 @@ export function createLibrary({ bundledEssays, loadJSON, deps }) {
     return { item }
   }
 
-  function updateImport(id, titleValue, bodyValue, fileMeta = {}) {
+  async function updateImport(id, titleValue, bodyValue, fileMeta = {}) {
     const existing = imports.find((item) => item.id === id)
     if (!existing) return { error: 'Could not save this text.' }
     const fileName = fileMeta.fileName ?? ''
@@ -343,6 +502,26 @@ export function createLibrary({ bundledEssays, loadJSON, deps }) {
     const body = keptImportBody(existing.body, bodyValue, validated.text)
     const title = resolvedImportTitle(titleValue, body, fileName)
     const nextItem = updatedImportRecord(existing, { title, body, updatedAt: new Date().toISOString() })
+    if (files) {
+      const stored = {
+        ...nextItem,
+        code: existing.code || nextImportCode(imports.filter((item) => item.id !== id)),
+        extension: textExtension({ fileName, existing: existing.extension }),
+      }
+      try {
+        await texts.write(stored)
+        const listed = await pullImportsAfterWrite()
+        const found = listed.find((item) => item.id === id)
+        if (!found || found.title !== title || found.body !== body) return { error: 'Could not save this text.' }
+        forgetStoredImport(id)
+        deps.clearImportNote()
+        deps.renderImportList()
+        if (kind === 'import' && importId === id) showOpenImport(existing, found)
+        return { item: found }
+      } catch {
+        return { error: 'Could not save this text.' }
+      }
+    }
     const next = imports.map((item) => (item.id === id ? nextItem : item))
     const saved = writeImports(next)
     if (!saved.ok) return { error: saved.quota ? QUOTA_IMPORT_MESSAGE : 'Could not save this text.' }
@@ -373,6 +552,25 @@ export function createLibrary({ bundledEssays, loadJSON, deps }) {
       message: `Delete "${item.title}"?`,
     })
     if (!accepted) return
+    if (files) {
+      try {
+        await texts.remove(id)
+      } catch {
+        deps.showImportNote('Could not delete this text.')
+        return
+      }
+      forgetStoredImport(id)
+      holdReloads(500)
+      importsToken += 1
+      imports = imports.filter((entry) => entry.id !== id)
+      deps.clearImportNote()
+      if (kind === 'import' && importId === id) {
+        closeDeletedImport()
+        return
+      }
+      deps.renderImportList()
+      return
+    }
     const next = imports.filter((entry) => entry.id !== id)
     const saved = writeImports(next)
     if (!saved.ok) {
@@ -440,6 +638,7 @@ export function createLibrary({ bundledEssays, loadJSON, deps }) {
       return importId
     },
     current,
+    bootTexts,
     bootFolder,
     restoreEssay,
     reloadEssays,

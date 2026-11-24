@@ -1,4 +1,4 @@
-const IMPORTS_KEY = 'teleprompter:imports'
+export const IMPORTS_KEY = 'teleprompter:imports'
 
 export const MAX_IMPORT_BYTES = 200 * 1024
 export const EMPTY_IMPORT_MESSAGE = 'Paste some text or choose a .txt or .md file.'
@@ -123,6 +123,15 @@ export function writeImports(list) {
     return { ok: true }
   } catch (error) {
     return { ok: false, quota: isQuotaError(error) }
+  }
+}
+
+export function clearImports() {
+  try {
+    localStorage.removeItem(IMPORTS_KEY)
+    return true
+  } catch {
+    return false
   }
 }
 

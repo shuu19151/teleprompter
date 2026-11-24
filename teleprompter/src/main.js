@@ -11,6 +11,7 @@ import { loadBundledEssays } from './library/bundled-essays.js'
 import { inTauri } from './library/essay-folder.js'
 import { createImportDialog } from './library/import-dialog.js'
 import { createLibrary } from './library/library-controller.js'
+import { createTextsStore } from './library/texts-store.js'
 import { createSidebar, stageEmptyMessage } from './library/sidebar-view.js'
 import { createReaderController } from './reading/reader-controller.js'
 import { createReaderLayout } from './reading/reader-layout.js'
@@ -131,9 +132,12 @@ const fullscreen = createFullscreen({
   },
 })
 
+const textsStore = createTextsStore()
+
 const library = createLibrary({
   bundledEssays,
   loadJSON,
+  texts: textsStore,
   deps: {
     stopRecordingAndSave: recorder.stopRecordingAndSave,
     closeRecorderPanel: recorder.closeRecorderPanel,
@@ -205,6 +209,7 @@ async function start() {
       recorder.notePageVisibility(false)
     })
   }
+  await library.bootTexts()
   await library.bootFolder()
   library.restoreEssay()
   await recorder.warmStore()

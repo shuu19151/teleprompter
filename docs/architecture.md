@@ -4,7 +4,7 @@
 
 `window.__teleprompterTest` is not defined. Playwright starts `vite --mode test` and reads the DOM. A production build must not contain the string `__teleprompterTest`.
 
-Behavior, CSS, and DOM ids and classes are unchanged. `teleprompter:position` is still one slot for the open text, written by `src/reading/reader-progress.js`. Takes are the exception: `Documents/Teleprompter` is the list. `src-tauri` scans that folder, deletes a take, reads its audio for playback, and watches the folder.
+Behavior, CSS, and DOM ids and classes are unchanged. `teleprompter:position` is still one slot for the open text, written by `src/reading/reader-progress.js`. Takes and imported texts are the exception: `Documents/Teleprompter` is the list of takes, and `Documents/Teleprompter/texts` is the list of imported texts. `src-tauri` scans those folders, writes and deletes the files, reads them back, and watches each folder.
 
 ## Wiring order
 
@@ -21,6 +21,7 @@ Later modules call earlier ones only through functions that run after startup, s
 `readThemeStorage()` copies a legacy theme key. `start()` then:
 
 - In the Tauri shell, listens for the window close, saves the reading position, and stops an open take.
+- In the Tauri shell, migrates imported texts into `Documents/Teleprompter/texts` and loads that list.
 - Boots the essay folder and restores the saved text.
 - Warms the recording store and the script size.
 - Mounts the window.
@@ -61,10 +62,12 @@ Line counts are the file length after this phase, including comments.
 | `src/library/bundled-essays.js` | 17 | Eager `E*.txt` glob |
 | `src/library/essay-files.js` | 16 | Case-sensitive essay filename rule |
 | `src/library/essay-folder.js` | 234 | Folder picker, Tauri path, browser handle |
-| `src/library/import-store.js` | 237 | `teleprompter:imports` and text parsing |
+| `src/library/import-store.js` | 246 | Text parsing, and `teleprompter:imports` on the Vite page |
+| `src/library/texts-catalog.js` | 157 | File rows, display codes, and the localStorage migration |
+| `src/library/texts-store.js` | 109 | Tauri text commands, or localStorage outside the window |
 | `src/library/import-dialog.js` | 252 | Import and edit dialog |
 | `src/library/content-selection.js` | 93 | Which text is open, and the position-slot shape |
-| `src/library/library-controller.js` | 456 | Essay list, imports, folder boot |
+| `src/library/library-controller.js` | 655 | Essay list, imports, folder boot |
 | `src/library/sidebar-view.js` | 304 | Sidebar markup and row menus |
 | `src/reading/reader-math.js` | 96 | Scroll, focus, and progress math |
 | `src/reading/reader-layout.js` | 186 | `teleprompter:fontSize` and stage measurement |
@@ -96,3 +99,13 @@ Line counts are the file length after this phase, including comments.
 The first launch copies each IndexedDB take that does not already have a non-empty file, writes the sidecar for a file that is already there, and only then deletes the blob. `teleprompter:takesMigrated` is set after that finishes. Stopping halfway leaves the flag unset, and the next launch continues.
 
 Outside the Tauri window the same store methods keep an in-memory list and still write the blob to IndexedDB, so the Playwright page can record a take and read it back.
+
+## Texts
+
+`Documents/Teleprompter/texts` is the list of imported texts in the Windows app. A text is `<code>-<slug>.md` (or `.txt` when the import came from a `.txt` file) plus a `<stem>.json` sidecar (`version`, `id`, `code`, `title`, `createdAt`, `updatedAt`). The text file is the script only. The sidecar holds the id that takes already store as `textKey`, so a rename done by the app keeps those takes attached. Names that already exist get `-2`, `-3`, and so on.
+
+A JSON sidecar matches the take files. The script stays the exact bytes the reader stores, and a file dropped into the folder is listed without being rewritten. The id for a file with no sidecar is a stable hash of the file name (`file-` plus 16 hex digits), and the title comes from that name. A code such as `U3` is read from the file name when it is there.
+
+`texts_list`, `texts_read`, `texts_write`, and `texts_delete` are the commands. Delete removes that text's file and sidecar and does not touch takes. A debounced watcher emits `texts://changed`. The page also rescans when it starts and when the window gains focus.
+
+The first launch writes each `teleprompter:imports` entry that is not already the same file, reads it back, and only then removes that entry. An entry that does not read back stays in localStorage. Outside the Tauri window, My texts still uses `teleprompter:imports`, so the Playwright page can import a text and read it back.
