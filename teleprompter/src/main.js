@@ -3,9 +3,9 @@
  */
 import '@fontsource/jetbrains-mono/400.css'
 import '@fontsource/jetbrains-mono/500.css'
-import '@fontsource/jetbrains-mono/700.css'
+import '@fontsource/jetbrains-mono/600.css'
 import '@fontsource/literata/latin-400.css'
-import '@fontsource/literata/latin-700.css'
+import '@fontsource/literata/latin-600.css'
 import './style.css'
 import { loadBundledEssays } from './library/bundled-essays.js'
 import { inTauri } from './library/essay-folder.js'
