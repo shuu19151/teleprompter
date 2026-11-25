@@ -639,9 +639,13 @@ h1 {
     width: min(330px, 88vw);
     visibility: hidden;
     transform: translateX(-105%);
-    transition: transform 0.25s ease;
+    transition: transform 320ms ease-in-out, visibility 0s 320ms;
   }
-  .is-drawer .sidebar { visibility: visible; transform: none; }
+  .is-drawer .sidebar {
+    visibility: visible;
+    transform: none;
+    transition-delay: 0s;
+  }
   .backdrop {
     display: block;
     position: fixed;
