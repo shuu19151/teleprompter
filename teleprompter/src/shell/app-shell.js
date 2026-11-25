@@ -16,7 +16,7 @@ export function mountApp({
   app.innerHTML = `
     <div class="window">
       <header class="topbar">
-        <button class="menu" id="menu" type="button" aria-label="Essays" aria-controls="sidebar" aria-expanded="false">Menu</button>
+        <button class="menu" id="menu" type="button" aria-controls="sidebar" aria-expanded="false">Menu</button>
         <div class="brand">Teleprompter</div>
         <label class="search">
           <span class="sr">Search essays and texts</span>

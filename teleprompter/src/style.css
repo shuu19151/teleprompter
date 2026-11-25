@@ -627,7 +627,7 @@ h1 {
   transition-duration: 0.7s;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1024px) {
   .menu { display: inline-flex; align-items: center; }
   .body { display: block; }
   .sidebar {
@@ -637,10 +637,11 @@ h1 {
     bottom: 0;
     left: 0;
     width: min(330px, 88vw);
+    visibility: hidden;
     transform: translateX(-105%);
     transition: transform 0.25s ease;
   }
-  .is-drawer .sidebar { transform: none; }
+  .is-drawer .sidebar { visibility: visible; transform: none; }
   .backdrop {
     display: block;
     position: fixed;
@@ -648,10 +649,12 @@ h1 {
     z-index: 15;
     border: 0;
     background: rgb(29 27 24 / 35%);
-    opacity: 0;
-    pointer-events: none;
+    visibility: hidden;
   }
-  .is-drawer .backdrop { opacity: 1; pointer-events: auto; }
+  .is-drawer .backdrop { visibility: visible; }
+}
+
+@media (max-width: 900px) {
   .sheet { padding: 20px 14px 28px; }
   .stage { padding: 16px; }
 
