@@ -103,6 +103,16 @@ pub fn note_stream_fault(fault: &AtomicBool) {
   fault.store(true, Ordering::Release);
 }
 
+fn handle_stream_error(error: cpal::Error, fault: &AtomicBool) {
+  // WASAPI reports a capture discontinuity as an xrun and keeps delivering audio.
+  if error.kind() == cpal::ErrorKind::Xrun {
+    log::warn!("microphone glitch, still recording: {error}");
+    return;
+  }
+  note_stream_fault(fault);
+  log::error!("microphone stream error: {error}");
+}
+
 pub fn start_input(
   opened: OpenedInput,
   producer: Producer<f32>,
@@ -169,10 +179,7 @@ where
       move |data: &[T], _| {
         push_frames(data, channels, channel, &mut producer, &dropped, to_f32);
       },
-      move |error| {
-        log::error!("microphone stream error: {error}");
-        note_stream_fault(&fault);
-      },
+      move |error| handle_stream_error(error, &fault),
       None,
     )
     .map_err(|error| RecorderError::Capture(error.to_string()))
@@ -327,6 +334,18 @@ mod tests {
   fn a_stream_fault_is_only_an_atomic() {
     let fault = AtomicBool::new(false);
     note_stream_fault(&fault);
+    assert!(fault.load(Ordering::Acquire));
+  }
+
+  #[test]
+  fn xruns_leave_the_stream_fault_clear() {
+    let fault = AtomicBool::new(false);
+    for _ in 0..4 {
+      handle_stream_error(cpal::ErrorKind::Xrun.into(), &fault);
+    }
+    assert!(!fault.load(Ordering::Acquire));
+
+    handle_stream_error(cpal::ErrorKind::DeviceNotAvailable.into(), &fault);
     assert!(fault.load(Ordering::Acquire));
   }
 
