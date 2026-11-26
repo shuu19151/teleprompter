@@ -13,6 +13,9 @@
   --selected: #ede3d6;
   --radius: 12px;
   --topbar-height: 56px;
+  --sidebar-width: 280px;
+  --sidebar-motion: 320ms;
+  --sidebar-easing: ease-in-out;
   --font: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --serif: "Literata", "Source Serif 4", "Source Serif Pro", Georgia, "Iowan Old Style", Palatino, serif;
   --script-size: 32px;
@@ -134,7 +137,8 @@ textarea::placeholder { font: inherit; }
 
 .body {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  transition: grid-template-columns var(--sidebar-motion) var(--sidebar-easing);
   height: 100%;
   min-height: 0;
 }
@@ -237,6 +241,7 @@ textarea::placeholder { font: inherit; }
 .backdrop { display: none; }
 
 .sheet {
+  grid-column: 2;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -629,17 +634,19 @@ h1 {
 
 @media (max-width: 1024px) {
   .menu { display: inline-flex; align-items: center; }
-  .body { display: block; }
+  .body { grid-template-columns: 0px minmax(0, 1fr); }
   .sidebar {
     position: fixed;
     z-index: 20;
     top: var(--topbar-height);
     bottom: 0;
     left: 0;
-    width: min(330px, 88vw);
+    width: var(--sidebar-width);
     visibility: hidden;
-    transform: translateX(-105%);
-    transition: transform 320ms ease-in-out, visibility 0s 320ms;
+    transform: translateX(-100%);
+    transition:
+      transform var(--sidebar-motion) var(--sidebar-easing),
+      visibility 0s var(--sidebar-motion);
   }
   .is-drawer .sidebar {
     visibility: visible;
@@ -659,6 +666,7 @@ h1 {
 }
 
 @media (max-width: 900px) {
+  .sidebar { width: min(330px, 88vw); }
   .sheet { padding: 20px 14px 28px; }
   .stage { padding: 16px; }
 
@@ -716,6 +724,11 @@ h1 {
   box-shadow: none;
 }
 
+html.is-reading-fullscreen .body {
+  grid-template-columns: 0px minmax(0, 1fr);
+  transition: none;
+}
+
 html.is-reading-fullscreen .topbar,
 html.is-reading-fullscreen .sidebar,
 html.is-reading-fullscreen .backdrop,
@@ -727,6 +740,7 @@ html.is-reading-fullscreen .mic-row {
 
 @media (prefers-reduced-motion: reduce) {
   .line,
+  .body,
   .sidebar,
   .recorder-panel,
   .notice {
