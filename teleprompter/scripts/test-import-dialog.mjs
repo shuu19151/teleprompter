@@ -36,6 +36,8 @@ test('import and confirm dialogs keep their ids, labels, and actions', () => {
   assert.match(importDialog, /id="import-name"/)
   assert.match(importDialog, /id="import-body"/)
   assert.match(importDialog, /id="import-file"/)
+  assert.match(importDialog, /id="import-file-button"[^>]+aria-label="Choose a text file"/)
+  assert.match(importDialog, /id="import-file-name" aria-live="polite">No file chosen</)
   assert.match(importDialog, /id="import-error"/)
   assert.match(importDialog, /id="import-cancel"/)
   assert.ok(importDialog.includes('id="import-save" type="submit">Import</button>'))

@@ -37,9 +37,16 @@ export function importDialogMarkup() {
         <label class="field">Text
           <textarea id="import-body" rows="10" placeholder="Paste text here"></textarea>
         </label>
-        <label class="field">File
-          <input id="import-file" type="file" accept=".txt,.md,text/plain,text/markdown" />
-        </label>
+        <div class="field">
+          <span>File</span>
+          <div class="import-file-control">
+            <input id="import-file" class="import-file-input" type="file" accept=".txt,.md,text/plain,text/markdown" tabindex="-1" aria-hidden="true" />
+            <button class="tool import-file-button" id="import-file-button" type="button" aria-label="Choose a text file" title="Choose a text file">
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>
+            </button>
+            <span class="import-file-name" id="import-file-name" aria-live="polite">No file chosen</span>
+          </div>
+        </div>
         <p class="hint">.txt or .md, UTF-8, up to 200 KB. You can also drop a file on the window.</p>
         <p id="import-error" class="import-error" role="alert" hidden></p>
         <div class="dialog-actions">
@@ -64,6 +71,11 @@ function clearDialogError() {
   note.textContent = ''
 }
 
+function setSelectedFileName(name = '') {
+  const label = document.querySelector('#import-file-name')
+  if (label) label.textContent = name || 'No file chosen'
+}
+
 function setDialogMode(mode) {
   const heading = document.querySelector('#import-heading')
   const save = document.querySelector('#import-save')
@@ -86,6 +98,7 @@ export function createImportDialog(deps) {
     importFileName = ''
     importMarkdown = false
     dialog.querySelector('form')?.reset()
+    setSelectedFileName()
     clearDialogError()
     setDialogMode('import')
     dialog.showModal()
@@ -101,6 +114,7 @@ export function createImportDialog(deps) {
     importFileName = ''
     importMarkdown = false
     dialog.querySelector('form')?.reset()
+    setSelectedFileName()
     clearDialogError()
     const name = dialog.querySelector('#import-name')
     const body = dialog.querySelector('#import-body')
@@ -136,7 +150,6 @@ export function createImportDialog(deps) {
       showDialogError(result.error)
       return
     }
-    document.querySelector('#import-dialog')?.close()
     deps.selectImport(result.item.id)
   }
 
@@ -148,6 +161,7 @@ export function createImportDialog(deps) {
       importFileName = ''
       importMarkdown = false
       dialog.querySelector('form')?.reset()
+      setSelectedFileName()
       clearDialogError()
       setDialogMode('import')
       const back = importReturnFocus
@@ -155,9 +169,7 @@ export function createImportDialog(deps) {
       if (back?.isConnected) back.focus()
       else document.querySelector('#import-open')?.focus()
     })
-    dialog.addEventListener('click', (event) => {
-      if (event.target === dialog) dialog.close()
-    })
+    dialog.addEventListener('cancel', (event) => event.preventDefault())
     dialog.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
         event.stopPropagation()
@@ -201,7 +213,9 @@ export function createImportDialog(deps) {
         }
       })()
     })
-    document.querySelector('#import-file')?.addEventListener('change', async (event) => {
+    const fileInput = document.querySelector('#import-file')
+    document.querySelector('#import-file-button')?.addEventListener('click', () => fileInput?.click())
+    fileInput?.addEventListener('change', async (event) => {
       const input = event.target
       const file = input.files?.[0]
       input.value = ''
@@ -224,6 +238,7 @@ export function createImportDialog(deps) {
         if (box) box.value = text
         importFileName = file.name
         importMarkdown = isMarkdownName(file.name)
+        setSelectedFileName(file.name)
         clearDialogError()
       } catch {
         showDialogError(READ_IMPORT_MESSAGE)
@@ -251,6 +266,7 @@ export function createImportDialog(deps) {
       event.preventDefault()
       dragDepth = 0
       app.classList.remove('is-file-drop')
+      if (dialog.open) return
       const dropped = filesFromTransfer(event.dataTransfer)
       const file = dropped.find((item) => isTextFileName(item.name))
       importDroppedFile(file || dropped[0])

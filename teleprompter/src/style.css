@@ -789,9 +789,11 @@ html.is-reading-fullscreen .mic-row {
 }
 
 .import-dialog {
-  width: min(480px, calc(100vw - 32px));
-  max-height: min(640px, calc(100vh - 48px));
-  margin: 72px 28px auto auto;
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(640px, calc(100dvh - 32px));
+  margin: auto;
+  inset: 0;
+  overflow-y: auto;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -822,6 +824,7 @@ html.is-reading-fullscreen .mic-row {
 .import-form {
   display: grid;
   gap: 12px;
+  min-width: 0;
   padding: 20px;
 }
 
@@ -848,8 +851,7 @@ html.is-reading-fullscreen .mic-row {
 }
 
 .import-form input[type="text"],
-.import-form textarea,
-.import-form input[type="file"] {
+.import-form textarea {
   width: 100%;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
@@ -875,16 +877,61 @@ html.is-reading-fullscreen .mic-row {
 }
 
 .import-form textarea {
-  min-height: 180px;
+  height: clamp(120px, 24vh, 220px);
+  min-height: 0;
   padding: 8px 12px;
-  resize: vertical;
+  resize: none;
 }
 
-.import-form input[type="file"] {
-  padding: 8px;
-  font-size: 12px;
-  font-family: var(--font);
+.import-file-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
 }
+
+.import-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.import-file-button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  padding: 0;
+  background: var(--sheet);
+  color: var(--ink);
+}
+
+.import-file-button:hover {
+  background: var(--selected);
+}
+
+.import-file-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-2);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-file-button svg { display: block; }
 
 .import-form .hint {
   margin: 0;
@@ -917,10 +964,6 @@ html.is-reading-fullscreen .mic-row {
 #app.is-file-drop .stage {
   outline: 2px dashed var(--rust);
   outline-offset: -8px;
-}
-
-@media (max-width: 900px) {
-  .import-dialog { margin: 16px auto; }
 }
 
 .rec {

@@ -74,16 +74,64 @@ test('selects another essay, returns to the first, and reloads that selection', 
   await expect.poll(() => activeLineIndex(page)).toBe(0)
 })
 
+test('import dialog preserves drafts until canceled or submitted', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Import', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Import text' })
+  const body = dialog.locator('#import-body')
+  await body.fill('Draft text')
+  await expect(body).toHaveCSS('resize', 'none')
+
+  await page.mouse.click(5, 5)
+  await expect(dialog).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeVisible()
+  await expect(body).toHaveValue('Draft text')
+
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(dialog).toBeHidden()
+})
+
+test('import dialog stays centered and fits the app viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 1365, height: 768 })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Import', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Import text' })
+
+  for (const viewport of [
+    { width: 1365, height: 768 },
+    { width: 420, height: 360 },
+  ]) {
+    await page.setViewportSize(viewport)
+    const bounds = await dialog.evaluate((element) => {
+      const { x, y, width, height } = element.getBoundingClientRect()
+      return { x, y, width, height, viewportWidth: innerWidth, viewportHeight: innerHeight }
+    })
+    expect(bounds.x).toBeGreaterThanOrEqual(0)
+    expect(bounds.y).toBeGreaterThanOrEqual(0)
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(bounds.viewportWidth)
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(bounds.viewportHeight)
+    expect(Math.abs(bounds.x + bounds.width / 2 - bounds.viewportWidth / 2)).toBeLessThanOrEqual(1)
+    expect(Math.abs(bounds.y + bounds.height / 2 - bounds.viewportHeight / 2)).toBeLessThanOrEqual(1)
+  }
+
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+})
+
 test('imports a text and shows it', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: 'Import', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'Import text' })
   await expect(dialog).toBeVisible()
-  await dialog.locator('#import-file').setInputFiles({
+  const fileChooserPromise = page.waitForEvent('filechooser')
+  await dialog.getByRole('button', { name: 'Choose a text file' }).click()
+  const fileChooser = await fileChooserPromise
+  await fileChooser.setFiles({
     name: 'market-notes.txt',
     mimeType: 'text/plain',
     buffer: Buffer.from('Apples were expensive.\n\nI bought three and walked home.\n'),
   })
+  await expect(dialog.locator('#import-file-name')).toHaveText('market-notes.txt')
   await expect(dialog.locator('#import-body')).toHaveValue(/I bought three and walked home/)
   await dialog.getByRole('button', { name: 'Import', exact: true }).click()
   await expect(dialog).toBeHidden()
