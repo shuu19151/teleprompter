@@ -144,9 +144,6 @@ export function createRecorder(deps) {
     resumeRecordingFromPanel() {
       recorder.resumeRecordingFromPanel()
     },
-    onRecWithRunChange(event) {
-      recorder.onRecWithRunChange(event)
-    },
     onTakesContextMenu(event) {
       takes.onTakesContextMenu(event)
     },
@@ -155,9 +152,6 @@ export function createRecorder(deps) {
     },
     onTakesClick(event) {
       takes.onTakesClick(event)
-    },
-    isRecWithRun() {
-      return recorder.isRecWithRun()
     },
     recordingActive() {
       return recorder.recordingActive()

@@ -122,7 +122,6 @@ export function createReaderView({
     document.querySelector('#rec-stage')?.addEventListener('click', () => {
       void recording.toggleRecording()
     })
-    document.querySelector('#rec-with-run')?.addEventListener('click', recording.onRecWithRunChange)
     document.querySelector('#mic-idle')?.addEventListener('change', recording.onMicChange)
     document.querySelector('#recorder-mic')?.addEventListener('change', recording.onMicChange)
     recording.renderMicSelects()
@@ -173,6 +172,13 @@ export function createReaderView({
     document.querySelector('#text-view')?.addEventListener(
       'touchmove',
       (event) => {
+        const selection = window.getSelection?.()
+        const stage = document.querySelector('#text-view')
+        if (
+          selection &&
+          !selection.isCollapsed &&
+          (stage?.contains(selection.anchorNode) || stage?.contains(selection.focusNode))
+        ) return
         event.preventDefault() // stop browser pan / rubber-band
         const y = event.touches[0].clientY
         const delta = (_touchLastY - y) * TOUCH_SENSITIVITY
@@ -211,10 +217,6 @@ export function createReaderView({
         <button class="btn rec" id="rec" type="button" aria-pressed="false" aria-label="Start recording">
           <span class="rec-dot" aria-hidden="true"></span>
           <span>Rec</span>
-        </button>
-        <button class="btn rec-with-run" id="rec-with-run" type="button"
-          aria-pressed="${recording.isRecWithRun() ? 'true' : 'false'}">
-          Scroll with recording
         </button>
         <div class="sliders">
           <label class="speed">

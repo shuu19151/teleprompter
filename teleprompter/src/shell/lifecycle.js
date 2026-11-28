@@ -27,7 +27,7 @@ export function bindContextMenuBlock() {
     const target = event.target
     if (
       target instanceof Element &&
-      target.closest('input, textarea, [contenteditable="true"], [contenteditable=""]')
+      target.closest('#text-view, #import-name, #import-body')
     ) {
       return
     }

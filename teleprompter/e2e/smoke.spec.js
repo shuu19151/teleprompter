@@ -228,7 +228,13 @@ test('a short recording creates a take', async ({ page }) => {
   await page.getByRole('button', { name: 'Start recording' }).click()
   await expect(page.locator('#rec')).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('#recorder-panel')).toHaveAttribute('data-mode', 'recording')
+  await expect(page.locator('#run')).toHaveText('Pause')
   await expect.poll(async () => (await page.locator('#recorder-clock').innerText()).trim()).not.toBe('00:00.00')
+
+  const clockBeforeReaderPause = (await page.locator('#recorder-clock').innerText()).trim()
+  await page.locator('#run').click()
+  await expect(page.locator('#run')).toHaveText('Run')
+  await expect.poll(async () => (await page.locator('#recorder-clock').innerText()).trim()).not.toBe(clockBeforeReaderPause)
 
   await page.locator('#recorder-panel').getByRole('button', { name: 'Stop recording' }).click()
   await expect(page.locator('#takes-list .take-row')).toHaveCount(1)

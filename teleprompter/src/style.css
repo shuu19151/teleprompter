@@ -72,6 +72,9 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--font);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 button, input, textarea, select { font: inherit; color: inherit; }
@@ -344,6 +347,12 @@ h1 {
 .mic-select:focus-visible {
   outline: 2px solid var(--rust);
   outline-offset: 2px;
+}
+
+@media (pointer: coarse) {
+  .mic-select:focus-visible {
+    outline: none;
+  }
 }
 
 .mic-row .voice-enhance,
@@ -1042,38 +1051,6 @@ html.is-reading-fullscreen .mic-row {
   font-variant-numeric: tabular-nums;
 }
 
-/* Toggle button that replaced the old checkbox + label */
-.btn.rec-with-run {
-  height: 40px;
-  width: 100%;
-  padding: 0 6px;
-  font-size: 11px;
-  white-space: nowrap;
-  color: var(--muted);
-  background: var(--card);
-  border: 1px solid var(--line-strong);
-  flex: 0 0 auto;
-}
-
-@media (min-width: 640px) {
-  .btn.rec-with-run {
-    width: auto;
-    padding: 0 12px;
-    font-size: 13px;
-  }
-}
-
-.btn.rec-with-run[aria-pressed="true"] {
-  background: var(--ink);
-  color: var(--paper);
-  border-color: var(--ink);
-}
-
-.btn.rec-with-run:focus-visible {
-  outline: 2px solid var(--rust);
-  outline-offset: 2px;
-}
-
 .rec-message {
   display: flex;
   align-items: flex-start;
@@ -1363,7 +1340,6 @@ html.is-reading-fullscreen .mic-row {
 }
 
 .rec:focus-visible,
-.rec-with-run input:focus-visible,
 .icon-btn:focus-visible {
   outline: 2px solid var(--rust);
   outline-offset: 2px;
@@ -1379,9 +1355,10 @@ html.is-reading-fullscreen .mic-row {
   .recorder-panel { animation: none; transition: none; }
 }
 
-input,
-textarea,
-[contenteditable] {
+#text-view,
+#import-name,
+#import-body {
   user-select: text;
   -webkit-user-select: text;
+  -webkit-touch-callout: default;
 }
