@@ -159,6 +159,27 @@ export function createReaderView({
       },
       { passive: false },
     )
+
+    // Android touch drag — translate finger movement into the same scrollBy API
+    let _touchLastY = 0
+    document.querySelector('#text-view')?.addEventListener(
+      'touchstart',
+      (event) => {
+        _touchLastY = event.touches[0].clientY
+      },
+      { passive: true },
+    )
+    document.querySelector('#text-view')?.addEventListener(
+      'touchmove',
+      (event) => {
+        event.preventDefault() // stop browser pan / rubber-band
+        const y = event.touches[0].clientY
+        const delta = _touchLastY - y // positive = finger moves up = scroll down
+        _touchLastY = y
+        if (delta) scrollBy(delta)
+      },
+      { passive: false },
+    )
   }
 
   function renderSheet() {

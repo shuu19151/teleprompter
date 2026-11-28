@@ -105,6 +105,27 @@ export function createImportDialog(deps) {
     dialog.querySelector('#import-name')?.focus()
   }
 
+  function openImportDialogWithDraft({ title = '', body = '', fileName = '', markdown = false } = {}) {
+    const dialog = document.querySelector('#import-dialog')
+    if (!dialog) return
+    if (!dialog.open) {
+      importReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : document.querySelector('#import-open')
+    }
+    editingId = null
+    importFileName = fileName || ''
+    importMarkdown = Boolean(markdown)
+    dialog.querySelector('form')?.reset()
+    setSelectedFileName(importFileName)
+    clearDialogError()
+    const name = dialog.querySelector('#import-name')
+    const text = dialog.querySelector('#import-body')
+    if (name) name.value = title
+    if (text) text.value = body
+    setDialogMode('import')
+    if (!dialog.open) dialog.showModal()
+    (body ? name : text)?.focus()
+  }
+
   function openEditDialog(id) {
     const dialog = document.querySelector('#import-dialog')
     const item = deps.getImports().find((entry) => entry.id === id)
@@ -273,5 +294,5 @@ export function createImportDialog(deps) {
     })
   }
 
-  return { openImportDialog, openEditDialog, bind, markup: importDialogMarkup }
+  return { openImportDialog, openImportDialogWithDraft, openEditDialog, bind, markup: importDialogMarkup }
 }

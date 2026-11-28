@@ -227,7 +227,21 @@ async function start() {
   })
   if (inTauri()) {
     try {
-      const { invoke } = await import('@tauri-apps/api/core')
+      const { invoke, addPluginListener } = await import('@tauri-apps/api/core')
+      if (/Android/i.test(navigator.userAgent)) {
+        const applyIncoming = (payload) => {
+          if (!payload || (!payload.body && !payload.title)) return
+          importDialog.openImportDialogWithDraft({
+            title: payload.title || '',
+            body: payload.body || '',
+            fileName: payload.fileName || '',
+            markdown: Boolean(payload.markdown),
+          })
+        }
+        await addPluginListener('android-documents', 'pendingImport', applyIncoming)
+        const res = await invoke('plugin:android-documents|consumePendingImport')
+        if (res?.pending) applyIncoming(res.pending)
+      }
       await recoverUnfinishedRecordings({
         invoke: (command, args) => invoke(command, args),
         askConfirm: (options) => confirmDialog.askConfirm(options),

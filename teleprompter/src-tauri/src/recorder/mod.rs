@@ -568,7 +568,7 @@ fn path_string(path: &Path) -> String {
 }
 
 fn sessions_root(app: &AppHandle) -> Result<PathBuf, RecorderError> {
-  let documents = app.path().document_dir().map_err(|error| {
+  let documents = crate::recording_root(&app).map_err(|error| {
     RecorderError::Session(format!("could not find the Documents folder: {error}"))
   })?;
   Ok(documents.join("Teleprompter").join(SESSIONS_DIR))
@@ -770,7 +770,7 @@ pub fn recorder_recover_apply(
       "that recording is still open".into(),
     ));
   }
-  let root = app.path().document_dir().map_err(|error| {
+  let root = crate::recording_root(&app).map_err(|error| {
     RecorderError::Session(format!("could not find the Documents folder: {error}"))
   })?;
   let takes = root.join("Teleprompter");

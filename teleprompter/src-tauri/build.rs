@@ -15,5 +15,21 @@ fn main() {
       }
     }
   }
-  tauri_build::build()
+  let attributes = tauri_build::Attributes::new().plugin(
+    "android-documents",
+    tauri_build::InlinedPlugin::new().commands(&[
+      "ensureMicrophonePermission",
+      "shareTake",
+      "pickDirectory",
+      "getSavedDirectory",
+      "consumePendingImport",
+      "listTexts",
+      "readText",
+      "writeText",
+      "deleteText",
+      "registerListener",
+      "removeListener",
+    ]),
+  );
+  tauri_build::try_build(attributes).expect("build application permissions");
 }

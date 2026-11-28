@@ -420,6 +420,7 @@ h1 {
   height: auto;
   min-height: 0;
   overflow: hidden;
+  touch-action: none; /* let JS handle all touch gestures on Android */
   padding: 24px 28px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1326,4 +1327,11 @@ html.is-reading-fullscreen .mic-row {
 @media (prefers-reduced-motion: reduce) {
   .rec-dot,
   .recorder-panel { animation: none; transition: none; }
+}
+
+input,
+textarea,
+[contenteditable] {
+  user-select: text;
+  -webkit-user-select: text;
 }

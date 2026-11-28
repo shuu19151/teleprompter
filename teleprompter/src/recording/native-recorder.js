@@ -52,6 +52,9 @@ export function createNativeRecorder(handlers = {}) {
       if (typeof options.code === 'string' && options.code) args.code = options.code
       if (typeof options.title === 'string' && options.title) args.title = options.title
       try {
+        if (typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent)) {
+          await invoke('plugin:android-documents|ensureMicrophonePermission')
+        }
         return await invoke('recorder_start', args)
       } catch (error) {
         await unsubscribe()

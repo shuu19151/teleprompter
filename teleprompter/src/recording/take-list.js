@@ -61,6 +61,7 @@ export function createTakeList({
           <span class="take-duration">${deps.escapeHtml(duration)}</span>
         </span>
       </button>
+      ${inTauri() && /Android/i.test(navigator.userAgent) ? '<button type="button" class="take-options" aria-label="Recording options" aria-haspopup="menu">⋮</button>' : ''}
     </li>`
   }
 
@@ -151,7 +152,14 @@ export function createTakeList({
     const take = takeFromRow(row)
     if (!take) return
     const items = [{ label: 'Play', onSelect: () => void playShownTake(take.id) }]
-    if (inTauri() && typeof take.diskPath === 'string' && take.diskPath) {
+    if (inTauri() && /Android/i.test(navigator.userAgent)) {
+      items.push({ label: 'Export audio', onSelect: async () => {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core')
+          await invoke('plugin:android-documents|shareTake', { name: take.name || take.id })
+        } catch { deps.showNotice('Could not export this recording.') }
+      } })
+    } else if (inTauri() && typeof take.diskPath === 'string' && take.diskPath) {
       items.push({
         label: 'Show in folder',
         onSelect: () => void showTakeInFolder(take),
@@ -196,6 +204,12 @@ export function createTakeList({
   function onTakesClick(event) {
     const row = event.target.closest('.take-row')
     if (!row) return
+    const options = event.target.closest('.take-options')
+    if (options) {
+      const rect = options.getBoundingClientRect()
+      openTakeMenu(row, rect.left, rect.bottom, options)
+      return
+    }
     const id = row.dataset.takeId
     if (id) void playShownTake(id)
   }

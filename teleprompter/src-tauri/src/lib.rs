@@ -2,12 +2,25 @@ mod recorder;
 mod takes;
 mod texts;
 
-#[cfg(windows)]
 use tauri::Manager;
+
+fn recording_root(app: &tauri::AppHandle) -> tauri::Result<std::path::PathBuf> {
+  #[cfg(target_os = "android")]
+  return app.path().app_data_dir();
+  #[cfg(not(target_os = "android"))]
+  app.path().document_dir()
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-  tauri::Builder::default()
+  let builder = tauri::Builder::default();
+  #[cfg(target_os = "android")]
+  let builder = builder.plugin(tauri::plugin::Builder::<_, ()>::new("android-documents")
+    .setup(|_, api| {
+      api.register_android_plugin("com.shuu19151.teleprompter", "AndroidDocumentsPlugin")?;
+      Ok(())
+    }).build());
+  builder
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
     .plugin(tauri_plugin_opener::init())
@@ -43,6 +56,7 @@ pub fn run() {
     .setup(|app| {
       recorder::spawn_device_watch(app.handle().clone());
       takes::spawn_takes_watch(app.handle().clone());
+      #[cfg(not(target_os = "android"))]
       texts::spawn_texts_watch(app.handle().clone());
       if cfg!(debug_assertions) {
         app.handle().plugin(

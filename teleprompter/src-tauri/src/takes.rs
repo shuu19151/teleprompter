@@ -491,7 +491,7 @@ fn mvhd_duration_ms(body: &[u8]) -> Option<u64> {
 }
 
 fn takes_dir(app: &AppHandle) -> Result<PathBuf, TakesError> {
-  let documents = app.path().document_dir().map_err(|error| {
+  let documents = crate::recording_root(app).map_err(|error| {
     TakesError::Io(format!("could not find the Documents folder: {error}"))
   })?;
   Ok(documents.join("Teleprompter"))
