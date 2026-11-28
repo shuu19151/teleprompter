@@ -74,6 +74,23 @@ export function nativeMicOptions(devices) {
   return labelNativeMics(listed).map(({ deviceId, label }) => ({ deviceId, label }))
 }
 
+export function nativeMicRoutes(inputs) {
+  const rows = Array.isArray(inputs) ? inputs : []
+  const phone = rows.find((input) => /^(?:Default microphone|Microphone \d+)$/i.test(input.label)) || rows[0]
+  if (!phone?.deviceId) return []
+  const external = rows.filter((input) => input.deviceId !== phone.deviceId && !/^Microphone \d+$/i.test(input.label))
+  const preferred = external[0] || phone
+  return [
+    { deviceId: 'native:auto', captureDeviceId: preferred.deviceId, label: 'Automatic (recommended)' },
+    { deviceId: 'native:phone', captureDeviceId: phone.deviceId, label: 'Phone microphone' },
+    ...external.map((input, index) => ({
+      deviceId: `native:external:${index}`,
+      captureDeviceId: input.deviceId,
+      label: `External microphone · ${input.label}`,
+    })),
+  ]
+}
+
 export function applyDeviceLost({ active, finish, showRecMessage }) {
   showRecMessage?.(DEVICE_LOST_MESSAGE)
   if (active) return finish?.({ openAfter: false })
@@ -261,7 +278,9 @@ export function createMicrophoneController({
       devices = []
     }
     if (token !== micListToken) return
-    audioInputs = nativeMicOptions(devices)
+    const inputs = nativeMicOptions(devices)
+    const hasAndroidRoutes = devices.some((device) => /\((?:Microphone|Tuner|Virtual)\)\s*$/i.test(String(device?.name || '')))
+    audioInputs = hasAndroidRoutes ? nativeMicRoutes(inputs) : inputs
     if (!audioInputs.some((device) => device.deviceId === micId)) {
       saveMicId(audioInputs[0]?.deviceId || '')
     }
@@ -321,8 +340,9 @@ export function createMicrophoneController({
 
   function chosenMicId() {
     if (!micId) return ''
-    if (audioInputs.length && !audioInputs.some((device) => device.deviceId === micId)) return ''
-    return micId
+    const selected = audioInputs.find((device) => device.deviceId === micId)
+    if (audioInputs.length && !selected) return ''
+    return selected?.captureDeviceId || micId
   }
 
   async function openPrepared(deviceId) {

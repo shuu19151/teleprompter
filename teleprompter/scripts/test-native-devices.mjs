@@ -5,6 +5,7 @@ import {
   applyDeviceLost,
   createMicrophoneController,
   nativeMicOptions,
+  nativeMicRoutes,
 } from '../src/recording/microphone-controller.js'
 
 const MIC_KEY = 'teleprompter:micId'
@@ -92,6 +93,32 @@ test('Android exposes only capture-capable microphone endpoints', () => {
     [
       { deviceId: 'aaudio:3', label: 'Microphone 1' },
       { deviceId: 'aaudio:4', label: 'Microphone 2' },
+    ],
+  )
+})
+
+test('native microphone routes expose automatic and phone choices', () => {
+  assert.deepEqual(nativeMicRoutes([{ deviceId: 'aaudio:3', label: 'Microphone 1' }]), [
+    { deviceId: 'native:auto', captureDeviceId: 'aaudio:3', label: 'Automatic (recommended)' },
+    { deviceId: 'native:phone', captureDeviceId: 'aaudio:3', label: 'Phone microphone' },
+  ])
+  assert.deepEqual(nativeMicRoutes([]), [])
+})
+
+test('automatic routing prefers a named external microphone', () => {
+  assert.deepEqual(
+    nativeMicRoutes([
+      { deviceId: 'aaudio:phone', label: 'Microphone 1' },
+      { deviceId: 'aaudio:usb', label: 'EDIFIER ES850NB' },
+    ]),
+    [
+      { deviceId: 'native:auto', captureDeviceId: 'aaudio:usb', label: 'Automatic (recommended)' },
+      { deviceId: 'native:phone', captureDeviceId: 'aaudio:phone', label: 'Phone microphone' },
+      {
+        deviceId: 'native:external:0',
+        captureDeviceId: 'aaudio:usb',
+        label: 'External microphone · EDIFIER ES850NB',
+      },
     ],
   )
 })
