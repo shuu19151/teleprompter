@@ -79,6 +79,23 @@ test('native device rows keep the menu shape and put the default first', () => {
   )
 })
 
+test('Android exposes only capture-capable microphone endpoints', () => {
+  assert.deepEqual(
+    nativeMicOptions([
+      { id: 'aaudio:1', name: '2406APNFAG', isDefault: true },
+      { id: 'aaudio:2', name: '2406APNFAG', isDefault: false },
+      { id: 'aaudio:3', name: '2406APNFAG (Microphone)', isDefault: false },
+      { id: 'aaudio:4', name: '2406APNFAG (Microphone)', isDefault: false },
+      { id: 'aaudio:5', name: '2406APNFAG (Tuner)', isDefault: false },
+      { id: 'aaudio:6', name: '2406APNFAG (Virtual)', isDefault: false },
+    ]),
+    [
+      { deviceId: 'aaudio:3', label: 'Microphone 1' },
+      { deviceId: 'aaudio:4', label: 'Microphone 2' },
+    ],
+  )
+})
+
 test('the native menu fills from recorder_list_devices and refreshes on devices-changed', async () => {
   const selects = [createSelect(), createSelect()]
   installDom(selects)
@@ -128,10 +145,10 @@ test('the native menu fills from recorder_list_devices and refreshes on devices-
       { value: 'wasapi:{usb}', label: 'USB mic' },
     ])
     assert.deepEqual(labels(selects[1]), labels(selects[0]))
-    // The saved browser id is not a native id, so the menu shows the default and the key stays.
+    // A stale browser id is replaced with the first usable native input.
     assert.equal(selects[0].value, 'wasapi:{laptop}')
     assert.equal(selects[1].value, 'wasapi:{laptop}')
-    assert.equal(storage.data[MIC_KEY], 'browser-device-hash')
+    assert.equal(storage.data[MIC_KEY], 'wasapi:{laptop}')
 
     mic.onMicChange({ target: { value: 'wasapi:{usb}' } })
     assert.equal(storage.data[MIC_KEY], 'wasapi:{usb}')
@@ -150,7 +167,7 @@ test('the native menu fills from recorder_list_devices and refreshes on devices-
     assert.deepEqual(calls, ['recorder_list_devices', 'recorder_list_devices'])
     assert.deepEqual(labels(selects[0]), [{ value: 'wasapi:{laptop}', label: 'Laptop mic' }])
     assert.equal(selects[0].value, 'wasapi:{laptop}')
-    assert.equal(storage.data[MIC_KEY], 'wasapi:{usb}')
+    assert.equal(storage.data[MIC_KEY], 'wasapi:{laptop}')
 
     for (const handler of listeners.get('recorder://device-lost')) {
       handler({ payload: { deviceId: 'wasapi:{usb}' } })

@@ -10,9 +10,54 @@ export { DEVICE_LOST_MESSAGE }
 
 const MIC_KEY = 'teleprompter:micId'
 
+/** Strip noisy Android suffixes and collapse whitespace. */
+function cleanMicLabel(raw) {
+  const cleaned = String(raw || '')
+    .replace(/\s*\((?:Microphone|Tuner|Virtual|Default|Built-in)\)\s*/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return cleaned || 'Microphone'
+}
+
+/** When several devices share a label, append " · 2", " · 3", … */
+function dedupeMicLabels(list) {
+  const counts = new Map()
+  for (const item of list) {
+    counts.set(item.label, (counts.get(item.label) || 0) + 1)
+  }
+  const seen = new Map()
+  return list.map((item) => {
+    if ((counts.get(item.label) || 0) < 2) return item
+    const n = (seen.get(item.label) || 0) + 1
+    seen.set(item.label, n)
+    return { ...item, label: `${item.label} · ${n}` }
+  })
+}
+
+function labelNativeMics(list) {
+  const counts = new Map()
+  for (const item of list) counts.set(item.label, (counts.get(item.label) || 0) + 1)
+  const seen = new Map()
+  return list.map((item) => {
+    if ((counts.get(item.label) || 0) < 2) return item
+    const number = (seen.get(item.label) || 0) + 1
+    seen.set(item.label, number)
+    return {
+      ...item,
+      label: item.isDefault ? 'Default microphone' : `Microphone ${number}`,
+    }
+  })
+}
+
+function captureCapableNativeDevices(devices) {
+  const typed = devices.filter((device) => /\((?:Microphone|Tuner|Virtual)\)\s*$/i.test(String(device?.name || '')))
+  if (!typed.length) return devices
+  return typed.filter((device) => /\(Microphone\)\s*$/i.test(String(device?.name || '')))
+}
+
 /** Native devices, default first, in the shape the existing menu already renders. */
 export function nativeMicOptions(devices) {
-  const rows = Array.isArray(devices) ? devices : []
+  const rows = captureCapableNativeDevices(Array.isArray(devices) ? devices : [])
   const ordered = [
     ...rows.filter((device) => device && device.isDefault),
     ...rows.filter((device) => device && !device.isDefault),
@@ -23,10 +68,10 @@ export function nativeMicOptions(devices) {
     const deviceId = typeof device?.id === 'string' ? device.id : ''
     if (!deviceId || seen.has(deviceId)) continue
     seen.add(deviceId)
-    const label = String(device.name || '').trim() || 'Microphone'
-    listed.push({ deviceId, label })
+    const label = cleanMicLabel(device.name)
+    listed.push({ deviceId, label, isDefault: Boolean(device.isDefault) })
   }
-  return listed
+  return labelNativeMics(listed).map(({ deviceId, label }) => ({ deviceId, label }))
 }
 
 export function applyDeviceLost({ active, finish, showRecMessage }) {
@@ -57,9 +102,9 @@ export function listedAudioInputs(devices) {
   for (const device of inputs) {
     if (!device.deviceId || seen.has(device.deviceId)) continue
     seen.add(device.deviceId)
-    listed.push({ deviceId: device.deviceId, label: device.label.trim() || 'Microphone' })
+    listed.push({ deviceId: device.deviceId, label: cleanMicLabel(device.label) })
   }
-  return { labeled: true, inputs: listed }
+  return { labeled: true, inputs: dedupeMicLabels(listed) }
 }
 
 function pageIsVisible() {
@@ -216,9 +261,10 @@ export function createMicrophoneController({
       devices = []
     }
     if (token !== micListToken) return
-    // A browser device id saved by the web path is left as it is. The menu
-    // shows the default until the reader picks a native microphone.
     audioInputs = nativeMicOptions(devices)
+    if (!audioInputs.some((device) => device.deviceId === micId)) {
+      saveMicId(audioInputs[0]?.deviceId || '')
+    }
     renderMicSelects()
     if (foundInputDevice(devices, { native: true })) onInputDeviceFound?.()
   }

@@ -366,7 +366,14 @@ export function createRecorderController({ microphone, ui, wave, takes, store, d
   }
 
   function onRecWithRunChange(event) {
-    recWithRun = Boolean(event.target.checked)
+    const target = event.currentTarget || event.target
+    if (target && target.type === 'checkbox') {
+      recWithRun = Boolean(target.checked)
+    } else if (target) {
+      // Toggle button (aria-pressed)
+      recWithRun = target.getAttribute('aria-pressed') !== 'true'
+      target.setAttribute('aria-pressed', recWithRun ? 'true' : 'false')
+    }
     writeStorage(REC_WITH_RUN_KEY, JSON.stringify(recWithRun))
     syncRecorderToRun()
   }

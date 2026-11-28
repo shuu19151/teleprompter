@@ -122,7 +122,7 @@ export function createReaderView({
     document.querySelector('#rec-stage')?.addEventListener('click', () => {
       void recording.toggleRecording()
     })
-    document.querySelector('#rec-with-run')?.addEventListener('change', recording.onRecWithRunChange)
+    document.querySelector('#rec-with-run')?.addEventListener('click', recording.onRecWithRunChange)
     document.querySelector('#mic-idle')?.addEventListener('change', recording.onMicChange)
     document.querySelector('#recorder-mic')?.addEventListener('change', recording.onMicChange)
     recording.renderMicSelects()
@@ -160,8 +160,9 @@ export function createReaderView({
       { passive: false },
     )
 
-    // Android touch drag — translate finger movement into the same scrollBy API
+    // Android touch drag — translate finger movement into the same scrollBy API.
     let _touchLastY = 0
+    const TOUCH_SENSITIVITY = 2.0
     document.querySelector('#text-view')?.addEventListener(
       'touchstart',
       (event) => {
@@ -174,7 +175,7 @@ export function createReaderView({
       (event) => {
         event.preventDefault() // stop browser pan / rubber-band
         const y = event.touches[0].clientY
-        const delta = _touchLastY - y // positive = finger moves up = scroll down
+        const delta = (_touchLastY - y) * TOUCH_SENSITIVITY
         _touchLastY = y
         if (delta) scrollBy(delta)
       },
@@ -211,10 +212,10 @@ export function createReaderView({
           <span class="rec-dot" aria-hidden="true"></span>
           <span>Rec</span>
         </button>
-        <label class="rec-with-run">
-          <input id="rec-with-run" type="checkbox" ${recording.isRecWithRun() ? 'checked' : ''} />
-          Start scrolling with recording
-        </label>
+        <button class="btn rec-with-run" id="rec-with-run" type="button"
+          aria-pressed="${recording.isRecWithRun() ? 'true' : 'false'}">
+          Scroll with recording
+        </button>
         <div class="sliders">
           <label class="speed">
             Speed
