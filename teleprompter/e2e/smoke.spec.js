@@ -149,10 +149,10 @@ test('theme and font size persist after reload', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('html')).not.toHaveAttribute('data-theme', 'dark')
   const theme = page.locator('#theme')
-  await expect(theme).toHaveText('Dark')
+  await expect(theme).toHaveAttribute('aria-label', 'Switch to dark theme')
   await theme.click()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
-  await expect(theme).toHaveText('Light')
+  await expect(theme).toHaveAttribute('aria-label', 'Switch to light theme')
 
   await page.locator('#font-size').fill('44')
   await expect(page.locator('#font-size-value')).toHaveText('44')
@@ -160,7 +160,7 @@ test('theme and font size persist after reload', async ({ page }) => {
 
   await page.reload()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
-  await expect(page.locator('#theme')).toHaveText('Light')
+  await expect(page.locator('#theme')).toHaveAttribute('aria-label', 'Switch to light theme')
   await expect(page.locator('#font-size')).toHaveValue('44')
   await expect(page.locator('#font-size-value')).toHaveText('44')
   await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--script-size').trim())).toBe('44px')

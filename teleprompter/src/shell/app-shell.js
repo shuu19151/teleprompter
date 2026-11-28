@@ -1,8 +1,6 @@
-import { escapeAttr } from '../shared/html.js'
-import { bindThemeToggle, theme } from './theme.js'
+import { bindThemeToggle, theme, themeButtonMarkup } from './theme.js'
 
 export function mountApp({
-  query,
   sidebar,
   importDialog,
   confirmDialog,
@@ -16,13 +14,10 @@ export function mountApp({
   app.innerHTML = `
     <div class="window">
       <header class="topbar">
-        <button class="menu" id="menu" type="button" aria-controls="sidebar" aria-expanded="false">Menu</button>
-        <div class="brand">Teleprompter</div>
-        <label class="search">
-          <span class="sr">Search texts</span>
-          <input id="search" type="search" placeholder="Search" value="${escapeAttr(query)}" />
-        </label>
-        <button class="tool" id="theme" type="button">${theme() === 'dark' ? 'Light' : 'Dark'}</button>
+        <button class="menu" id="menu" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="Menu">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <button class="tool" id="theme" type="button" aria-label="${theme() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}">${themeButtonMarkup(theme())}</button>
       </header>
       <div class="body">
 ${sidebar.markup()}

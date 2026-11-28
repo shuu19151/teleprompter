@@ -215,7 +215,6 @@ async function start() {
   await recorder.warmStore()
   layout.syncScriptSize()
   mountApp({
-    query: library.query,
     sidebar,
     importDialog,
     confirmDialog,

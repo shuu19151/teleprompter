@@ -26,10 +26,14 @@ export function folderGestureMessage({ folderHandle, folderName }) {
   return `Click ${control} to allow reading this folder.`
 }
 
-export function sidebarMarkup({ dev, folderHandle, folderName }) {
+export function sidebarMarkup({ dev, folderHandle, folderName, query = '' }) {
   const reloadHidden = folderHandle ? '' : 'disabled'
   const nameHidden = folderName ? '' : 'hidden'
   return `        <aside class="sidebar" id="sidebar">
+          <label class="side-search">
+            <span class="sr">Search texts</span>
+            <input id="search" type="search" placeholder="Search" value="${query}" />
+          </label>
           <div class="side-head">
             <p class="side-label" id="imports-label">Texts</p>
             <div class="side-tools">
@@ -174,6 +178,7 @@ export function createSidebar({ library, escapeHtml, escapeAttr, inTauri, openIm
       dev: import.meta.env.DEV,
       folderHandle: library.folderHandle,
       folderName: library.folderName,
+      query: escapeAttr(library.query || ''),
     })
   }
 
