@@ -427,18 +427,25 @@ export function createWaveformView({ getAnalyser, resumeAudio, getElapsedMs, get
       const visual = document.querySelector('#recorder-visual')
       const rect = visual?.getBoundingClientRect()
       const pxPerSec = rect?.width ? timelineScale(rect.width).pxPerSec : 0
-      seekAnchor = { now: playback.audio?.currentTime || 0, pxPerSec }
+      seekAnchor = {
+        startX: event.clientX,
+        startTime: playback.audio?.currentTime || 0,
+        pxPerSec,
+        moved: false,
+      }
       seeking = true
       wrap.setPointerCapture?.(event.pointerId)
       seekPlayback(timeFromPointer(event, seekAnchor))
     })
     wrap.addEventListener('pointermove', (event) => {
-      if (!seeking) return
-      seekPlayback(timeFromPointer(event, seekAnchor))
+      if (!seeking || !seekAnchor) return
+      const dx = event.clientX - seekAnchor.startX
+      if (!seekAnchor.moved && Math.abs(dx) < 8) return
+      seekAnchor.moved = true
+      // kéo sang phải = lùi thời gian (waveform đi theo tay)
+      seekPlayback(seekAnchor.startTime - dx / seekAnchor.pxPerSec)
     })
-    const end = (event) => {
-      if (!seeking) return
-      if (event) seekPlayback(timeFromPointer(event, seekAnchor))
+    const end = () => {
       seeking = false
       seekAnchor = null
     }
