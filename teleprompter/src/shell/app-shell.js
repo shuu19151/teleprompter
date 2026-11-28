@@ -19,7 +19,7 @@ export function mountApp({
         <button class="menu" id="menu" type="button" aria-controls="sidebar" aria-expanded="false">Menu</button>
         <div class="brand">Teleprompter</div>
         <label class="search">
-          <span class="sr">Search essays and texts</span>
+          <span class="sr">Search texts</span>
           <input id="search" type="search" placeholder="Search" value="${escapeAttr(query)}" />
         </label>
         <button class="tool" id="theme" type="button">${theme() === 'dark' ? 'Light' : 'Dark'}</button>

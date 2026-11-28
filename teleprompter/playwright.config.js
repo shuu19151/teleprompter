@@ -9,7 +9,7 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   reporter: process.env.CI ? [['github'], ['list']] : 'list',
   use: {
-    baseURL: 'http://127.0.0.1:5173',
+    baseURL: 'http://127.0.0.1:5174',
     trace: 'on-first-retry',
     permissions: ['microphone'],
     launchOptions: {
@@ -23,9 +23,11 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'vite --mode test',
-    url: 'http://127.0.0.1:5173',
-    reuseExistingServer: !process.env.CI,
+    // Never reuse Tauri's dev server: it replaces browser capture with a
+    // native-only stub and cannot boot in Playwright's regular browser.
+    command: 'vite --mode test --port 5174',
+    url: 'http://127.0.0.1:5174',
+    reuseExistingServer: false,
     timeout: 120_000,
   },
 })

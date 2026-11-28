@@ -19,11 +19,11 @@ test('essay list empty copy follows search, permission, and folder', () => {
 })
 
 test('stage empty copy stays distinct from the essay list', () => {
-  assert.equal(stageEmptyMessage({ folderNeedsGesture: true, folderHandle: null }), 'Allow this folder to show its essays.')
-  assert.equal(stageEmptyMessage({ folderNeedsGesture: false, folderHandle: folder }), 'No .txt files in this folder.')
+  assert.equal(stageEmptyMessage({ folderNeedsGesture: true, folderHandle: null }), 'Allow access to your library folder.')
+  assert.equal(stageEmptyMessage({ folderNeedsGesture: false, folderHandle: folder }), 'No texts in this folder. Import a .txt or .md file to begin.')
   assert.equal(
     stageEmptyMessage({ folderNeedsGesture: false, folderHandle: null }),
-    'No essays found. Add an E01-....txt file next to this reader.',
+    'Choose a library folder to get started.',
   )
 })
 
@@ -38,21 +38,21 @@ test('folder permission prompt names Folder or reload', () => {
   assert.equal(folderGestureMessage({ folderHandle: null, folderName: '' }), 'Click reload to allow reading this folder.')
 })
 
-test('sidebar markup keeps the essay, import, and take controls', () => {
+test('sidebar has one Texts list and a separate Takes list', () => {
   const hidden = sidebarMarkup({ dev: false, folderHandle: null, folderName: '' })
-  assert.match(hidden, /id="reload" type="button" aria-label="Reload essays" hidden>/)
+  assert.match(hidden, /id="reload" type="button" aria-label="Refresh texts" disabled>/)
   assert.match(hidden, /id="folder-name" class="folder-name" hidden>/)
-  assert.match(hidden, /id="use-app-essays" type="button" hidden>/)
-  assert.match(hidden, /id="essay-list"/)
+  assert.doesNotMatch(hidden, /use-app-essays|essay-list|My texts/)
+  assert.match(hidden, />Texts<\/p>/)
   assert.match(hidden, /id="import-list" aria-labelledby="imports-label"/)
   assert.match(hidden, /id="takes-list" aria-labelledby="takes-label"/)
   assert.match(hidden, /id="choose-folder"/)
   assert.match(hidden, /id="import-open"/)
 
   const dev = sidebarMarkup({ dev: true, folderHandle: null, folderName: '' })
-  assert.match(dev, /aria-label="Reload essays" >/)
+  assert.match(dev, /aria-label="Refresh texts" disabled>/)
   const chosen = sidebarMarkup({ dev: false, folderHandle: { name: 'Essays' }, folderName: 'Essays' })
-  assert.match(chosen, /aria-label="Reload essays" >/)
+  assert.match(chosen, /aria-label="Refresh texts" >/)
   assert.match(chosen, /id="folder-name" class="folder-name" >/)
-  assert.match(chosen, /id="use-app-essays" type="button" >/)
+  assert.doesNotMatch(chosen, /use-app-essays/)
 })

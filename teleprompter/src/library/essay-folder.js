@@ -196,7 +196,7 @@ export async function pickEssayFolder(defaultPath) {
       directory: true,
       multiple: false,
       recursive: true,
-      title: 'Essays',
+      title: 'Text library',
       defaultPath: defaultPath || undefined,
     })
     if (picked == null) {
@@ -208,7 +208,7 @@ export async function pickEssayFolder(defaultPath) {
     if (!path) throw new Error('Could not open that folder.')
     return { path, name: folderBaseName(path) }
   }
-  return window.showDirectoryPicker({ id: 'teleprompter-essays', mode: 'read' })
+  return window.showDirectoryPicker({ id: 'teleprompter-essays', mode: 'readwrite' })
 }
 
 export async function readEssayFiles(folder) {

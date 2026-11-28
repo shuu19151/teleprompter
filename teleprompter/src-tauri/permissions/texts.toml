@@ -17,3 +17,8 @@ commands.allow = ["texts_write"]
 identifier = "allow-texts-delete"
 description = "Enables the texts_delete command."
 commands.allow = ["texts_delete"]
+
+[[permission]]
+identifier = "allow-texts-folder"
+description = "Reads and changes the selected text library and reads legacy texts for migration."
+commands.allow = ["texts_folder", "texts_set_folder", "texts_legacy_list"]

@@ -1,109 +1,71 @@
-/**
- * Imported texts. In the Tauri window the list is Documents/Teleprompter/texts.
- * On the Vite page the same sidebar keeps using localStorage, which is what
- * the Playwright smoke test reads.
- */
-import { inTauri } from './essay-folder.js'
-import { IMPORTS_KEY, clearImports, loadImports, writeImports } from './import-store.js'
-import { loadJSON } from '../shared/storage.js'
-import {
-  assignMigrationCodes,
-  filesToImports,
-  fileToImport,
-  importsAfterMigration,
-  migrateStoredImports,
-  toTextDraft,
-} from './texts-catalog.js'
+import { inTauri, loadSavedFolder, saveFolderHandle, pickEssayFolder, folderBaseName, folderPickerSupported } from './essay-folder.js'
+import { loadImports } from './import-store.js'
+import { filesToImports, fileToImport, toTextDraft, assignMigrationCodes } from './texts-catalog.js'
+import { createBrowserTexts } from './browser-texts.js'
+import { migrateLibrary } from './library-migration.js'
 
-async function tauriInvoke(command, args) {
+async function invoke(command, args) {
   const { invoke } = await import('@tauri-apps/api/core')
   return invoke(command, args)
 }
 
 export function createTextsStore() {
-  const enabled = inTauri()
-
-  async function call(command, args) {
-    return tauriInvoke(command, args)
-  }
-
-  async function listFiles(displayCodes) {
-    return filesToImports(await call('texts_list'), { displayCodes })
-  }
-
-  async function read(id) {
-    const file = await call('texts_read', { id: String(id) })
-    const row = fileToImport(file)
-    if (!row) throw new Error('Could not read that text.')
-    return row
-  }
-
-  async function write(record) {
-    if (!enabled) throw new Error('Could not save this text.')
-    await call('texts_write', { text: toTextDraft(record) })
-  }
-
-  async function remove(id) {
-    if (!enabled) return
-    await call('texts_delete', { id: String(id) })
-  }
-
-  async function migrate() {
-    if (!enabled) return { done: true, verified: [] }
-    const raw = loadJSON(IMPORTS_KEY)
-    const records = loadImports()
-    if (!records.length) return { done: true, verified: [] }
-    const existing = await listFiles(false)
-    const planned = assignMigrationCodes(records, existing)
-    const result = await migrateStoredImports({
-      records: planned,
-      async readText(id) {
-        try {
-          return await read(id)
-        } catch {
-          return null
-        }
-      },
-      writeText: (record) => write(record),
-    })
-    if (!result.verified.length) return result
-    const next = importsAfterMigration(raw, result.verified)
-    if (next.removeKey) {
-      if (!clearImports()) return { ...result, done: false }
-    } else if (next.list) {
-      const saved = writeImports(next.list)
-      if (!saved.ok) return { ...result, done: false }
-    }
-    return result
-  }
-
-  function watch(handler) {
-    if (!enabled || typeof handler !== 'function') return
-    import('@tauri-apps/api/event')
-      .then(({ listen }) => listen('texts://changed', () => handler()))
-      .catch(() => {})
-    if (typeof window !== 'undefined') {
-      window.addEventListener('focus', () => handler())
-    }
-    import('@tauri-apps/api/window')
-      .then(({ getCurrentWindow }) =>
-        getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-          if (focused) handler()
-        }),
-      )
-      .catch(() => {})
-  }
-
-  return {
-    enabled,
-    list() {
-      if (!enabled) return Promise.resolve(loadImports())
-      return listFiles(true)
+  const native = inTauri()
+  let folder = null
+  const browser = createBrowserTexts(() => folder)
+  const store = {
+    get folder() { return folder },
+    async boot() {
+      if (native) {
+        const path = await invoke('texts_folder')
+        folder = path ? { path, name: folderBaseName(path) } : null
+      } else {
+        folder = await loadSavedFolder()
+      }
     },
-    read,
-    write,
-    remove,
-    migrate,
-    watch,
+    async choose() {
+      if (!folderPickerSupported()) throw new Error('Use the desktop app or Chrome/Edge to choose a library folder.')
+      const previous = folder || await loadSavedFolder().catch(() => null)
+      const picked = await pickEssayFolder(previous?.path)
+      if (native) await invoke('texts_set_folder', { path: picked.path })
+      else await saveFolderHandle(picked)
+      folder = picked
+    },
+    async allow() {
+      if (!native && folder?.requestPermission) {
+        if (await folder.requestPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('Allow access to this folder first.')
+      }
+    },
+    async list() {
+      if (!folder) return []
+      return native ? filesToImports(await invoke('texts_list')) : browser.list()
+    },
+    async read(id) {
+      return native ? fileToImport(await invoke('texts_read', { id })) : browser.read(id)
+    },
+    async write(record) {
+      if (!folder) throw new Error('Choose a library folder first.')
+      return native ? fileToImport(await invoke('texts_write', { text: toTextDraft(record) })) : browser.write(record)
+    },
+    async remove(id) {
+      if (!folder) throw new Error('Choose a library folder first.')
+      if (native) await invoke('texts_delete', { id })
+      else await browser.remove(id)
+    },
+    async migrate(bundledEssays) {
+      if (!folder) return
+      if (JSON.parse(localStorage.getItem('teleprompter:library-migration-v1') || '{}').complete) return
+      const legacy = native ? filesToImports(await invoke('texts_legacy_list')) : []
+      const bundled = bundledEssays.map(item => ({ ...item, id: item.file, extension: 'txt', createdAt: 0, bundled: true }))
+      const records = [...new Map([...bundled, ...loadImports(), ...legacy].map(item => [item.id, item])).values()]
+      await migrateLibrary({ store, records: assignMigrationCodes(records, await store.list()), storage: localStorage })
+    },
+    watch(handler) {
+      if (typeof window !== 'undefined') window.addEventListener('focus', handler)
+      if (native) {
+        import('@tauri-apps/api/event').then(({ listen }) => listen('texts://changed', handler)).catch(() => {})
+      }
+    },
   }
+  return store
 }

@@ -29,6 +29,9 @@ pub fn run() {
       texts::texts_read,
       texts::texts_write,
       texts::texts_delete,
+      texts::texts_folder,
+      texts::texts_set_folder,
+      texts::texts_legacy_list,
     ])
     // The page origin is http://tauri.localhost. Allowing the microphone here
     // answers getUserMedia before WebView2 draws its site permission prompt.

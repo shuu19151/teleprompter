@@ -4,7 +4,7 @@
 
 `window.__teleprompterTest` is not defined. Playwright starts `vite --mode test` and reads the DOM. A production build must not contain the string `__teleprompterTest`.
 
-Behavior, CSS, and DOM ids and classes are unchanged. `teleprompter:position` is still one slot for the open text, written by `src/reading/reader-progress.js`. Takes and imported texts are the exception: `Documents/Teleprompter` is the list of takes, and `Documents/Teleprompter/texts` is the list of imported texts. `src-tauri` scans those folders, writes and deletes the files, reads them back, and watches each folder.
+`teleprompter:position` remains one slot for the open text. The sidebar has one Texts list (`import-list`) and a separate Takes list. Texts use a selected directory; recordings remain in `Documents/Teleprompter`. The library controller holds one list and one selected ID for all texts.
 
 ## Wiring order
 
@@ -21,8 +21,7 @@ Later modules call earlier ones only through functions that run after startup, s
 `readThemeStorage()` copies a legacy theme key. `start()` then:
 
 - In the Tauri shell, listens for the window close, saves the reading position, and stops an open take.
-- In the Tauri shell, migrates imported texts into `Documents/Teleprompter/texts` and loads that list.
-- Boots the essay folder and restores the saved text.
+- Restores the selected library folder, resumes any pending migration, loads its texts and restores the saved selection.
 - Warms the recording store and the script size.
 - Mounts the window.
 - Listens for microphone changes.
@@ -64,10 +63,12 @@ Line counts are the file length after this phase, including comments.
 | `src/library/essay-folder.js` | 234 | Folder picker, Tauri path, browser handle |
 | `src/library/import-store.js` | 246 | Text parsing, and `teleprompter:imports` on the Vite page |
 | `src/library/texts-catalog.js` | 157 | File rows, display codes, and the localStorage migration |
-| `src/library/texts-store.js` | 109 | Tauri text commands, or localStorage outside the window |
+| `src/library/texts-store.js` | — | Selected folder, native/browser adapters and migration |
+| `src/library/browser-texts.js` | — | Browser File System Access reads, writes and deletes |
+| `src/library/library-migration.js` | — | Verified migration checkpoints with retained source backups |
 | `src/library/import-dialog.js` | 252 | Import and edit dialog |
 | `src/library/content-selection.js` | 93 | Which text is open, and the position-slot shape |
-| `src/library/library-controller.js` | 655 | Essay list, imports, folder boot |
+| `src/library/library-controller.js` | — | One text list and selected ID, mutations and conflict checks |
 | `src/library/sidebar-view.js` | 304 | Sidebar markup and row menus |
 | `src/reading/reader-math.js` | 96 | Scroll, focus, and progress math |
 | `src/reading/reader-layout.js` | 186 | `teleprompter:fontSize` and stage measurement |
@@ -102,10 +103,10 @@ Outside the Tauri window the same store methods keep an in-memory list and still
 
 ## Texts
 
-`Documents/Teleprompter/texts` is the list of imported texts in the Windows app. A text is `<code>-<slug>.md` (or `.txt` when the import came from a `.txt` file) plus a `<stem>.json` sidecar (`version`, `id`, `code`, `title`, `createdAt`, `updatedAt`). The text file is the script only. The sidecar holds the id that takes already store as `textKey`, so a rename done by the app keeps those takes attached. Names that already exist get `-2`, `-3`, and so on.
+The library is a user-selected directory containing `.txt`/`.md` files and `<stem>.json` sidecars (`version`, `id`, `code`, `title`, `createdAt`, `updatedAt`). Native selection is persisted in app data as `text-library.json`; `texts_set_folder` only accepts a path granted by the native picker. Browser directory handles are persisted in IndexedDB. A missing directory is an error, never recreated automatically.
 
-A JSON sidecar matches the take files. The script stays the exact bytes the reader stores, and a file dropped into the folder is listed without being rewritten. The id for a file with no sidecar is a stable hash of the file name (`file-` plus 16 hex digits), and the title comes from that name. A code such as `U3` is read from the file name when it is there.
+Native files without metadata retain filename-derived IDs. Legacy `E01-*.txt` essays retain their filename reading ID and parse the first paragraph as the title; recordings continue using their original E code even after edits. The browser adapter uses the same sidecar format, so managed files retain identity across environments.
 
-`texts_list`, `texts_read`, `texts_write`, and `texts_delete` are the commands. Delete removes that text's file and sidecar and does not touch takes. A debounced watcher emits `texts://changed`. The page also rescans when it starts and when the window gains focus.
+`texts_list`, `texts_read`, `texts_write`, and `texts_delete` operate on the selected directory. `texts_folder` restores it, `texts_set_folder` changes it, and `texts_legacy_list` reads the old Documents directory for migration. The watcher follows folder switches and emits `texts://changed`. Refresh is deferred while a dialog or mutation is active. Editing compares the current file against the loaded version before writing to detect external changes.
 
-The first launch writes each `teleprompter:imports` entry that is not already the same file, reads it back, and only then removes that entry. An entry that does not read back stays in localStorage. Outside the Tauri window, My texts still uses `teleprompter:imports`, so the Playwright page can import a text and read it back.
+On the first selected library, migration copies legacy Documents texts, `teleprompter:imports`, and bundled examples. It retains the sources, verifies copies, and checkpoints IDs under `teleprompter:library-migration-v1`. Completed copies are not resurrected after deletion, and completed migration never copies texts into subsequently selected libraries. Imports skip equal normalized title/body pairs; different content keeps a separate ID and collision-free filename. Playwright exercises the browser adapter with real OPFS directory handles saved in IndexedDB.

@@ -7,6 +7,11 @@ export const RULER_SIDE_MAJORS = 4.5
 
 export function takeTextKey(item) {
   if (!item) return ''
+  // Migrated essays keep their filename as the reading ID, but their existing
+  // recordings were keyed by E01, E02, etc. This survives file/title edits.
+  const legacyCode = item.kind === 'import' && /^E\d+.*\.txt$/i.test(item.id || '')
+    ? item.id.match(/^E\d+/i)?.[0] : null
+  if (legacyCode) return legacyCode
   return item.kind === 'import' ? item.id : item.code
 }
 

@@ -140,6 +140,7 @@ const library = createLibrary({
   texts: textsStore,
   deps: {
     stopRecordingAndSave: recorder.stopRecordingAndSave,
+    isEditing: () => Boolean(document.querySelector('#import-dialog')?.open),
     closeRecorderPanel: recorder.closeRecorderPanel,
     saveProgressNow: progress.saveProgressNow,
     renderSheet: view.renderSheet,
@@ -210,7 +211,6 @@ async function start() {
     })
   }
   await library.bootTexts()
-  await library.bootFolder()
   library.restoreEssay()
   await recorder.warmStore()
   layout.syncScriptSize()

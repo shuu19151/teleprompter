@@ -1,4 +1,7 @@
 import { expect, test } from '@playwright/test'
+import { prepareLibrary } from './library-fixture.js'
+
+test.beforeEach(async ({ page }) => { await prepareLibrary(page) })
 
 const E01_TITLE = 'How I Stay Productive and Calm at Work'
 const E02_TITLE = 'How I Give and Receive Feedback at Work'
@@ -13,7 +16,7 @@ test('opens the default essay, runs, and reloads at the paused line', async ({ p
   await page.goto('/')
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(E01_TITLE)
   await expect(page.locator('#text-script')).toContainText('When people ask me what my job')
-  await expect(page.locator('#essay-list .essay.is-on .code')).toHaveText('E01')
+  await expect(page.locator('#import-list .essay.is-on .code')).toHaveText('E01')
   await expect(page.getByRole('button', { name: 'Run', exact: true })).toBeVisible()
 
   await page.locator('#speed').fill('50')
@@ -37,7 +40,7 @@ test('opens the default essay, runs, and reloads at the paused line', async ({ p
     await document.fonts.ready
   })
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(E01_TITLE)
-  await expect(page.locator('#essay-list .essay.is-on .code')).toHaveText('E01')
+  await expect(page.locator('#import-list .essay.is-on .code')).toHaveText('E01')
   await expect.poll(() => activeLineIndex(page)).toBe(pausedLine)
   await expect(page.locator('#text-script .line.is-active')).toHaveText(pausedText)
 })
@@ -53,15 +56,15 @@ test('selects another essay, returns to the first, and reloads that selection', 
   const pausedLine = await activeLineIndex(page)
   expect(pausedLine).toBeGreaterThan(2)
 
-  await page.locator('#essay-list .essay', { hasText: 'E02' }).click()
+  await page.locator('#import-list .essay', { hasText: 'E02' }).click()
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(E02_TITLE)
-  await expect(page.locator('#essay-list .essay.is-on .code')).toHaveText('E02')
+  await expect(page.locator('#import-list .essay.is-on .code')).toHaveText('E02')
   await expect(page.locator('#text-script')).toContainText('When people ask me about the hardest')
 
   // One position slot: choosing E02 replaces it, so E01 opens at the top.
-  await page.locator('#essay-list .essay', { hasText: 'E01' }).click()
+  await page.locator('#import-list .essay', { hasText: 'E01' }).click()
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(E01_TITLE)
-  await expect(page.locator('#essay-list .essay.is-on .code')).toHaveText('E01')
+  await expect(page.locator('#import-list .essay.is-on .code')).toHaveText('E01')
   await expect(page.locator('#text-script')).toContainText('When people ask me what my job')
   await expect.poll(() => activeLineIndex(page)).toBe(0)
 
@@ -70,7 +73,7 @@ test('selects another essay, returns to the first, and reloads that selection', 
     await document.fonts.ready
   })
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(E01_TITLE)
-  await expect(page.locator('#essay-list .essay.is-on .code')).toHaveText('E01')
+  await expect(page.locator('#import-list .essay.is-on .code')).toHaveText('E01')
   await expect.poll(() => activeLineIndex(page)).toBe(0)
 })
 

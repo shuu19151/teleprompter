@@ -1,4 +1,4 @@
-//! Imported texts stored in Documents/Teleprompter/texts.
+//! Unified text library stored in the user's selected directory.
 //!
 //! Each text is a `.md` or `.txt` file plus a `<stem>.json` sidecar. The sidecar
 //! holds the id, the display code, the title, and the timestamps. The text file
@@ -17,6 +17,7 @@ use notify::Watcher;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_fs::FsExt;
 
 use crate::takes::ChangeDebounce;
 
@@ -145,31 +146,37 @@ fn collect_texts(dir: &Path) -> Result<Vec<ListedText>, TextsError> {
       .map(system_time_ms)
       .unwrap_or(0);
     let len = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
-    let body = if len > MAX_READ_BYTES {
-      String::new()
-    } else {
-      read_script(&path)
-    };
+    if len > MAX_READ_BYTES {
+      return Err(TextsError::Io(format!("Text is too large to read: {name}")));
+    }
+    let mut body = fs::read_to_string(&path).map_err(|error| TextsError::Io(format!("{name}: {error}")))?;
     let parsed = read_sidecar(&dir.join(sidecar_name(&name)));
     let sidecar = parsed.as_ref().is_some_and(|side| !side.id.trim().is_empty());
     let side = parsed.filter(|side| !side.id.trim().is_empty());
     let stem = file_stem(&name);
     let (name_code, name_title) = title_and_code_from_stem(&stem);
+    let legacy_essay = !sidecar && extension == "txt" && name_code.starts_with('E');
     let id = side
       .as_ref()
       .map(|side| side.id.clone())
       .filter(|id| !id.trim().is_empty())
-      .unwrap_or_else(|| stable_file_id(&name));
+      .unwrap_or_else(|| if legacy_essay { name.clone() } else { stable_file_id(&name) });
     let code = side
       .as_ref()
       .map(|side| side.code.clone())
       .filter(|code| !code.trim().is_empty())
       .unwrap_or(name_code);
-    let title = side
+    let mut title = side
       .as_ref()
       .map(|side| side.title.clone())
       .filter(|title| !title.trim().is_empty())
       .unwrap_or(name_title);
+    if legacy_essay {
+      let normalized = body.replace("\r\n", "\n");
+      let (heading, script) = normalized.trim().split_once("\n\n").unwrap_or((normalized.trim(), ""));
+      title = title_case(heading);
+      body = script.to_string();
+    }
     let created_at = side
       .as_ref()
       .map(|side| side.created_at.clone())
@@ -477,12 +484,6 @@ fn stored_created_at(value: &Value, existing: &[ListedText]) -> Value {
   Value::from(now_ms())
 }
 
-fn read_script(path: &Path) -> String {
-  let bytes = fs::read(path).unwrap_or_default();
-  String::from_utf8(bytes)
-    .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
-}
-
 fn read_sidecar(path: &Path) -> Option<Sidecar> {
   let bytes = fs::read(path).ok()?;
   serde_json::from_slice(&bytes).ok()
@@ -694,11 +695,50 @@ fn path_is_hidden(path: &Path) -> bool {
   })
 }
 
-fn texts_dir(app: &AppHandle) -> Result<PathBuf, TextsError> {
+fn legacy_texts_dir(app: &AppHandle) -> Result<PathBuf, TextsError> {
   let documents = app.path().document_dir().map_err(|error| {
     TextsError::Io(format!("could not find the Documents folder: {error}"))
   })?;
   Ok(documents.join("Teleprompter").join("texts"))
+}
+
+fn library_config(app: &AppHandle) -> Result<PathBuf, TextsError> {
+  Ok(app.path().app_data_dir().map_err(|e| TextsError::Io(e.to_string()))?.join("text-library.json"))
+}
+
+#[tauri::command(async)]
+pub fn texts_folder(app: AppHandle) -> Result<Option<String>, TextsError> {
+  let path = library_config(&app)?;
+  match fs::read(&path) {
+    Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| TextsError::Io(e.to_string())),
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+    Err(e) => Err(TextsError::Io(e.to_string())),
+  }
+}
+
+fn texts_dir(app: &AppHandle) -> Result<PathBuf, TextsError> {
+  let path = texts_folder(app.clone())?.ok_or_else(|| TextsError::Io("Choose a library folder first.".into()))?;
+  let dir = PathBuf::from(path);
+  // Never recreate a missing selected folder: it may be a disconnected drive.
+  fs::read_dir(&dir).map_err(|e| TextsError::Io(e.to_string()))?;
+  Ok(dir)
+}
+
+#[tauri::command(async)]
+pub fn texts_set_folder(app: AppHandle, path: String) -> Result<(), TextsError> {
+  let dir = PathBuf::from(&path);
+  if !dir.is_absolute() || !app.fs_scope().is_allowed(&dir) {
+    return Err(TextsError::Io("Choose this folder using Folder first.".into()));
+  }
+  fs::read_dir(&dir).map_err(|e| TextsError::Io(e.to_string()))?;
+  let config = library_config(&app)?;
+  fs::create_dir_all(config.parent().unwrap()).map_err(|e| TextsError::Io(e.to_string()))?;
+  write_leaf(&config, &serde_json::to_vec(&path).map_err(|e| TextsError::Io(e.to_string()))?)
+}
+
+#[tauri::command(async)]
+pub fn texts_legacy_list(app: AppHandle) -> Result<Vec<ListedText>, TextsError> {
+  scan_texts(&legacy_texts_dir(&app)?)
 }
 
 pub fn spawn_texts_watch(app: AppHandle) {
@@ -715,18 +755,26 @@ pub fn spawn_texts_watch(app: AppHandle) {
 }
 
 fn watch_texts(app: AppHandle) -> Result<(), String> {
-  let dir = texts_dir(&app).map_err(|error| error.to_string())?;
-  fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+  let mut watched: Option<PathBuf> = None;
   let (tx, rx) = std::sync::mpsc::channel();
   let mut watcher = notify::recommended_watcher(move |result| {
     let _ = tx.send(result);
   })
   .map_err(|error| error.to_string())?;
-  watcher
-    .watch(&dir, notify::RecursiveMode::NonRecursive)
-    .map_err(|error| error.to_string())?;
   let mut debounce = ChangeDebounce::new(TEXTS_WATCH_DEBOUNCE);
+  let mut checked = Instant::now() - Duration::from_secs(1);
   loop {
+    if checked.elapsed() >= Duration::from_millis(500) {
+      checked = Instant::now();
+      let next = texts_dir(&app).ok();
+      if next != watched {
+        if let Some(old) = watched.take() { let _ = watcher.unwatch(&old); }
+        if let Some(dir) = next {
+          if watcher.watch(&dir, notify::RecursiveMode::NonRecursive).is_ok() { watched = Some(dir); }
+        }
+        debounce.note(Instant::now());
+      }
+    }
     match rx.recv_timeout(Duration::from_millis(50)) {
       Ok(Ok(event)) => {
         if event_touches_text(&event.paths) {
@@ -747,7 +795,6 @@ fn watch_texts(app: AppHandle) -> Result<(), String> {
 #[tauri::command(async)]
 pub fn texts_list(app: AppHandle) -> Result<Vec<ListedText>, TextsError> {
   let dir = texts_dir(&app)?;
-  fs::create_dir_all(&dir).map_err(|error| TextsError::Io(error.to_string()))?;
   scan_texts(&dir)
 }
 
@@ -848,6 +895,29 @@ mod tests {
     assert_eq!(text.updated_at, None);
     assert_eq!(Path::new(&text.path).parent(), Some(dir.path()));
     assert!(dir.path().join("E01-take.m4a").exists());
+  }
+
+  #[test]
+  fn legacy_essay_keeps_reading_id_and_title_when_edited() {
+    let dir = TempDir::new();
+    let name = "E01-original.txt";
+    fs::write(dir.path().join(name), "MY TITLE\r\n\r\nBody\r\n").unwrap();
+    let before = read_text(dir.path(), name).unwrap();
+    assert_eq!(before.title, "My Title");
+    assert_eq!(before.body, "Body");
+    assert_eq!(before.code, "E01");
+    let after = write_text(dir.path(), &draft(name, "E01", "Edited Title", "New body")).unwrap();
+    assert_eq!(after.id, name);
+    assert_eq!(after.title, "Edited Title");
+    assert_eq!(after.body, "New body");
+    assert_eq!(scan_texts(dir.path()).unwrap().len(), 1);
+  }
+
+  #[test]
+  fn unreadable_text_is_an_error_instead_of_an_empty_script() {
+    let dir = TempDir::new();
+    fs::write(dir.path().join("broken.txt"), [0xff, 0xfe]).unwrap();
+    assert!(scan_texts(dir.path()).is_err());
   }
 
   #[test]
