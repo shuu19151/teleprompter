@@ -122,9 +122,7 @@ export function createReaderView({
     document.querySelector('#rec-stage')?.addEventListener('click', () => {
       void recording.toggleRecording()
     })
-    document.querySelector('#rec-with-run')?.addEventListener('change', recording.onRecWithRunChange)
-    document.querySelector('#mic-idle')?.addEventListener('change', recording.onMicChange)
-    document.querySelector('#recorder-mic')?.addEventListener('change', recording.onMicChange)
+    recording.bindMicPicker()
     recording.renderMicSelects()
     document.querySelector('#recorder-stop')?.addEventListener('click', () => {
       void recording.finishRecording()
@@ -159,6 +157,35 @@ export function createReaderView({
       },
       { passive: false },
     )
+
+    // Android touch drag — translate finger movement into the same scrollBy API.
+    let _touchLastY = 0
+    const TOUCH_SENSITIVITY = 2.0
+    document.querySelector('#text-view')?.addEventListener(
+      'touchstart',
+      (event) => {
+        _touchLastY = event.touches[0].clientY
+      },
+      { passive: true },
+    )
+    document.querySelector('#text-view')?.addEventListener(
+      'touchmove',
+      (event) => {
+        const selection = window.getSelection?.()
+        const stage = document.querySelector('#text-view')
+        if (
+          selection &&
+          !selection.isCollapsed &&
+          (stage?.contains(selection.anchorNode) || stage?.contains(selection.focusNode))
+        ) return
+        event.preventDefault() // stop browser pan / rubber-band
+        const y = event.touches[0].clientY
+        const delta = (_touchLastY - y) * TOUCH_SENSITIVITY
+        _touchLastY = y
+        if (delta) scrollBy(delta)
+      },
+      { passive: false },
+    )
   }
 
   function renderSheet() {
@@ -190,10 +217,6 @@ export function createReaderView({
           <span class="rec-dot" aria-hidden="true"></span>
           <span>Rec</span>
         </button>
-        <label class="rec-with-run">
-          <input id="rec-with-run" type="checkbox" ${recording.isRecWithRun() ? 'checked' : ''} />
-          Start scrolling with recording
-        </label>
         <div class="sliders">
           <label class="speed">
             Speed
@@ -210,7 +233,9 @@ export function createReaderView({
       </div>
       <div class="mic-row" id="mic-row">
         ${MIC_ICON}
-        <select class="mic-select" id="mic-idle" aria-label="Microphone"></select>
+        <button class="mic-select" id="mic-idle" type="button" aria-label="Choose microphone" aria-haspopup="dialog">
+          <span class="mic-select-label">Microphone</span>
+        </button>
       </div>
       <div class="stage-frame" id="stage-frame">
       ${recording.recorderPanelHtml()}

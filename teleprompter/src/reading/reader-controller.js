@@ -177,10 +177,6 @@ export function createReaderController({
     if (!raf) startLoop()
   }
 
-  // With "Start scrolling with recording" on, MediaRecorder pauses and resumes
-  // with Run. With it off, scrolling leaves the recorder alone, except a pause
-  // the reader started from the panel (manualHold) stays paused.
-
   function pauseRun() {
     if (!running) {
       syncRecorderToRun()

@@ -92,6 +92,9 @@ export function createRecorder(deps) {
     renderMicSelects() {
       microphone.renderMicSelects()
     },
+    bindMicPicker() {
+      microphone.bindMicPicker()
+    },
     refreshAudioInputs,
     onMicChange(event) {
       microphone.onMicChange(event)
@@ -144,9 +147,6 @@ export function createRecorder(deps) {
     resumeRecordingFromPanel() {
       recorder.resumeRecordingFromPanel()
     },
-    onRecWithRunChange(event) {
-      recorder.onRecWithRunChange(event)
-    },
     onTakesContextMenu(event) {
       takes.onTakesContextMenu(event)
     },
@@ -156,8 +156,14 @@ export function createRecorder(deps) {
     onTakesClick(event) {
       takes.onTakesClick(event)
     },
-    isRecWithRun() {
-      return recorder.isRecWithRun()
+    onTakesPointerDown(event) {
+      takes.onTakesPointerDown(event)
+    },
+    onTakesPointerMove(event) {
+      takes.onTakesPointerMove(event)
+    },
+    onTakesPointerEnd(event) {
+      takes.onTakesPointerEnd(event)
     },
     recordingActive() {
       return recorder.recordingActive()

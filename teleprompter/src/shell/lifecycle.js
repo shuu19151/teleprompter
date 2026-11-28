@@ -24,6 +24,13 @@ export function bindPageLeave(onLeave) {
 
 export function bindContextMenuBlock() {
   document.addEventListener('contextmenu', (event) => {
+    const target = event.target
+    if (
+      target instanceof Element &&
+      target.closest('#text-view, #import-name, #import-body')
+    ) {
+      return
+    }
     event.preventDefault()
   })
 }

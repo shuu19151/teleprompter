@@ -55,7 +55,13 @@ test('theme writes the JSON string for the chosen theme', () => {
 
 test('setTheme stores the choice and tells the waveform to repaint', () => {
   const root = { dataset: {} }
-  const button = { textContent: 'Dark' }
+  const button = {
+    attributes: {},
+    innerHTML: '',
+    setAttribute(name, value) {
+      this.attributes[name] = value
+    },
+  }
   const previousDocument = globalThis.document
   const previousStorage = globalThis.localStorage
   globalThis.document = {
@@ -73,7 +79,8 @@ test('setTheme stores the choice and tells the waveform to repaint', () => {
       },
     })
     assert.equal(root.dataset.theme, 'dark')
-    assert.equal(button.textContent, 'Light')
+    assert.match(button.innerHTML, /theme-icon/)
+    assert.equal(button.attributes['aria-label'], 'Switch to light theme')
     assert.equal(globalThis.localStorage.data['teleprompter:theme'], '"dark"')
     assert.equal(paints, 1)
 
@@ -83,7 +90,8 @@ test('setTheme stores the choice and tells the waveform to repaint', () => {
       },
     })
     assert.equal(root.dataset.theme, undefined)
-    assert.equal(button.textContent, 'Dark')
+    assert.match(button.innerHTML, /theme-icon/)
+    assert.equal(button.attributes['aria-label'], 'Switch to dark theme')
     assert.equal(globalThis.localStorage.data['teleprompter:theme'], '"light"')
     assert.equal(paints, 2)
   } finally {

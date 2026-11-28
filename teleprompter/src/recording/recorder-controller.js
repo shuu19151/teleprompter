@@ -16,47 +16,11 @@ import {
 } from './rec-messages.js'
 import { WAVE_STEP_MS, storedTake, takeMeta as buildTakeMeta, takeTextKey } from './recorder-math.js'
 
-const REC_WITH_RUN_KEY = 'teleprompter:recWithRun'
-
-function readStorage(key) {
-  try {
-    return localStorage.getItem(key)
-  } catch {
-    return null
-  }
-}
-
-function writeStorage(key, value) {
-  try {
-    localStorage.setItem(key, value)
-  } catch {
-    /* ignore quota or private mode */
-  }
-}
-
-function loadJSON(key) {
-  try {
-    const raw = readStorage(key)
-    if (raw === null) return null
-    return JSON.parse(raw)
-  } catch {
-    return null
-  }
-}
-
-function loadRecWithRun() {
-  const saved = loadJSON(REC_WITH_RUN_KEY)
-  if (typeof saved === 'boolean') return saved
-  return true
-}
-
 export function createRecorderController({ microphone, ui, wave, takes, store, deps, recorderKind = 'web' }) {
-  let recWithRun = loadRecWithRun()
   let recordingMeta = null
   let saveTask = null
   let pendingCommit = null
   let panelMode = 'closed'
-  let manualHold = false
   let openAfterSave = true
   let playback = null
 
@@ -109,17 +73,7 @@ export function createRecorderController({ microphone, ui, wave, takes, store, d
   }
 
   function syncRecorderToRun() {
-    if (capture.phase !== 'recording' && capture.phase !== 'paused') return
-    if (!recWithRun) {
-      if (!manualHold) capture.resume()
-      ui.syncRecUi()
-      return
-    }
-    if (deps.isRunning()) {
-      manualHold = false
-      capture.resume()
-    } else capture.pause()
-    ui.syncRecUi()
+    // Reader Run/Pause is independent from the active audio capture.
   }
 
   function releasePlayback() {
@@ -255,7 +209,6 @@ export function createRecorderController({ microphone, ui, wave, takes, store, d
     openAfterSave = openAfter
     const meta = recordingMeta || takeMeta()
     recordingMeta = null
-    manualHold = false
     let resolveSave = () => {}
     const task = new Promise((resolve) => {
       resolveSave = resolve
@@ -291,7 +244,6 @@ export function createRecorderController({ microphone, ui, wave, takes, store, d
     ui.noteRecordingStarted()
     wave.resetPeaks()
     wave.resetRulerTrack()
-    manualHold = false
     panelMode = 'recording'
     recordingMeta = takeMeta()
     ui.syncPanelChrome()
@@ -325,16 +277,15 @@ export function createRecorderController({ microphone, ui, wave, takes, store, d
       return
     }
     wave.startWaveLoop()
-    if (recWithRun) deps.playRun()
+    deps.playRun()
     ui.syncRecUi()
     if (capture.stream) void microphone.refreshAudioInputs()
   }
 
   function finishRecording(options) {
     if (!capture.isActive()) return Promise.resolve(null)
-    const pauseWith = recWithRun
     const task = stopRecordingAndSave(options)
-    if (pauseWith) deps.pauseRun()
+    deps.pauseRun()
     return task
   }
 
@@ -345,30 +296,14 @@ export function createRecorderController({ microphone, ui, wave, takes, store, d
 
   function pauseRecordingFromPanel() {
     if (capture.phase !== 'recording') return
-    if (recWithRun) {
-      manualHold = false
-      deps.pauseRun()
-      return
-    }
-    manualHold = true
     capture.pause()
     ui.syncRecUi()
   }
 
   function resumeRecordingFromPanel() {
     if (capture.phase !== 'paused') return
-    manualHold = false
-    if (recWithRun) deps.playRun()
-    else {
-      capture.resume()
-      ui.syncRecUi()
-    }
-  }
-
-  function onRecWithRunChange(event) {
-    recWithRun = Boolean(event.target.checked)
-    writeStorage(REC_WITH_RUN_KEY, JSON.stringify(recWithRun))
-    syncRecorderToRun()
+    capture.resume()
+    ui.syncRecUi()
   }
 
   function showSavedPlayback(meta, result) {
@@ -489,12 +424,8 @@ export function createRecorderController({ microphone, ui, wave, takes, store, d
     toggleRecording,
     pauseRecordingFromPanel,
     resumeRecordingFromPanel,
-    onRecWithRunChange,
     openPlayback,
     togglePlayback,
-    isRecWithRun() {
-      return recWithRun
-    },
     recordingActive() {
       return capture.isActive()
     },

@@ -12,7 +12,6 @@ import {
   recordingSampleWindow,
   rulerMark,
   rulerWindow,
-  timeAtPointer,
   timelineScale,
   waveX,
 } from './recorder-math.js'
@@ -204,7 +203,8 @@ export function createWaveformView({ getAnalyser, resumeAudio, getElapsedMs, get
     label.dataset.index = String(index)
     label.dataset.ms = String(mark.tMs)
     label.style.left = `${mark.x}px`
-    label.textContent = formatFine(mark.tMs)
+    // mm:ss only; centiseconds make neighbouring labels collide on phones
+    label.textContent = formatFine(mark.tMs).slice(0, -3)
     track.appendChild(label)
   }
 
@@ -392,18 +392,6 @@ export function createWaveformView({ getAnalyser, resumeAudio, getElapsedMs, get
     playGen += 1
   }
 
-  function timeFromPointer(event, anchor) {
-    const visual = document.querySelector('#recorder-visual')
-    if (!visual) return 0
-    const rect = visual.getBoundingClientRect()
-    if (!rect.width) return 0
-    const x = event.clientX - rect.left
-    const centerX = rect.width / 2
-    const pxPerSec = anchor?.pxPerSec || timelineScale(rect.width).pxPerSec
-    const now = anchor?.now || 0
-    return timeAtPointer({ x, centerX, pxPerSec, now })
-  }
-
   function seekPlayback(timeSec) {
     const playback = getPlayback()
     const duration = playbackDuration()
@@ -422,31 +410,32 @@ export function createWaveformView({ getAnalyser, resumeAudio, getElapsedMs, get
     const wrap = document.querySelector('#recorder-wave-wrap')
     if (!wrap) return
     wrap.addEventListener('pointerdown', (event) => {
-      const playback = getPlayback()
-      if (getPanelMode() !== 'playback' || !playback) return
-      const visual = document.querySelector('#recorder-visual')
-      const rect = visual?.getBoundingClientRect()
-      const pxPerSec = rect?.width ? timelineScale(rect.width).pxPerSec : 0
-      seekAnchor = { now: playback.audio?.currentTime || 0, pxPerSec }
-      seeking = true
+      if (event.isPrimary === false || getPanelMode() !== 'playback' || !getPlayback()) return
+      // A touch alone never seeks; only a horizontal drag does.
+      seekAnchor = { startX: event.clientX, startTime: 0, pxPerSec: 0 }
       wrap.setPointerCapture?.(event.pointerId)
-      seekPlayback(timeFromPointer(event, seekAnchor))
     })
     wrap.addEventListener('pointermove', (event) => {
-      if (!seeking) return
-      seekPlayback(timeFromPointer(event, seekAnchor))
+      if (event.isPrimary === false || !seekAnchor) return
+      if (!seeking) {
+        if (Math.abs(event.clientX - seekAnchor.startX) < 8) return
+        // Anchor where the drag is recognised, so the wave does not jump.
+        const width = document.querySelector('#recorder-visual')?.getBoundingClientRect().width
+        if (!width) return
+        seekAnchor = {
+          startX: event.clientX,
+          startTime: getPlayback()?.audio?.currentTime || 0,
+          pxPerSec: timelineScale(width).pxPerSec,
+        }
+        seeking = true
+        return
+      }
+      const dx = event.clientX - seekAnchor.startX
+      // kéo sang phải = lùi thời gian (waveform đi theo tay)
+      seekPlayback(seekAnchor.startTime - dx / seekAnchor.pxPerSec)
     })
-    const end = (event) => {
-      if (!seeking) return
-      if (event) seekPlayback(timeFromPointer(event, seekAnchor))
-      seeking = false
-      seekAnchor = null
-    }
-    wrap.addEventListener('pointerup', end)
-    wrap.addEventListener('pointercancel', () => {
-      seeking = false
-      seekAnchor = null
-    })
+    wrap.addEventListener('pointerup', clearSeek)
+    wrap.addEventListener('pointercancel', clearSeek)
   }
 
   async function decodeTakePeaks(blob) {

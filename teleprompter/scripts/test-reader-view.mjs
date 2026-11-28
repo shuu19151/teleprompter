@@ -35,6 +35,7 @@ test('the reader opens the mic with the sheet and does not render voice enhance'
     isRecWithRun: () => true,
     renderTakes: () => Promise.resolve(),
     renderMicSelects() {},
+    bindMicPicker() {},
     resetRulerTrack() {},
     syncRecUi() {},
     restoreRecorderPanel() {},
@@ -115,6 +116,8 @@ test('the reader opens the mic with the sheet and does not render voice enhance'
     assert.deepEqual(opened, [false, false, true])
     assert.match(sheet.innerHTML, /id="mic-idle"/)
     assert.match(sheet.innerHTML, /id="rec"/)
+    assert.equal(sheet.innerHTML.includes('rec-with-run'), false)
+    assert.equal(sheet.innerHTML.includes('Scroll with recording'), false)
     assert.equal(sheet.innerHTML.includes('Voice enhance'), false)
     assert.equal(sheet.innerHTML.includes('voice-enhance'), false)
     assert.equal(typeof recording.voiceEnhanceControl, 'undefined')

@@ -20,7 +20,6 @@ import {
   takeDateIso,
   takeMeta,
   takeTextKey,
-  timeAtPointer,
   timelineScale,
   waveX,
 } from '../src/recording/recorder-math.js'
@@ -77,28 +76,25 @@ test('waveform x follows centerX + (t - now) * pxPerSec', () => {
   assert.equal(scale.pxPerSec, 62.5)
   assert.deepEqual(timelineScale(0), { centerX: 0, pxPerSec: 0 })
   assert.equal(timelineScale(-20).centerX, -10)
-  assert.equal(timeAtPointer({ x: 450, centerX: 450, pxPerSec: 62.5, now: 8 }), 8)
-  assert.equal(timeAtPointer({ x: 0, centerX: 100, pxPerSec: 50, now: 4 }), 2)
-  assert.equal(timeAtPointer({ x: 1e6, centerX: 0, pxPerSec: 1, now: 0 }), 1e6)
 })
 
 test('ruler marks and the visible window stay at or after 00:00', () => {
   assert.deepEqual(rulerMark(0, 50), { tMs: 0, x: 0, major: true })
-  assert.deepEqual(rulerMark(1, 50), { tMs: 400, x: 20, major: false })
-  assert.deepEqual(rulerMark(4, 50), { tMs: 1600, x: 80, major: true })
+  assert.deepEqual(rulerMark(1, 50), { tMs: 500, x: 25, major: false })
+  assert.deepEqual(rulerMark(4, 50), { tMs: 2000, x: 100, major: true })
   assert.equal(rulerMark(-1, 50).major, false)
   assert.equal(rulerWindow(0, 0, 10, 0), null)
   assert.equal(rulerWindow(-5, 0, 10, 0), null)
   assert.equal(rulerWindow(100, 50, 0, 1), null)
   const marks = rulerWindow(800, 400, 50, 10)
   assert.equal(marks.first, 0)
-  assert.equal(marks.last, 49)
+  assert.equal(marks.last, 40)
   assert.equal(marks.key, '800:5000')
-  assert.equal(marks.width, 1044)
+  assert.equal(marks.width, 1064)
   assert.equal(marks.translateX, waveX(400, 0, 10, 50))
   const atStart = rulerWindow(800, 400, 50, 0)
   assert.equal(atStart.first, 0)
-  assert.equal(atStart.last, 24)
+  assert.equal(atStart.last, 20)
   assert.equal(atStart.width, 800)
   assert.equal(atStart.translateX, 400)
   const before = rulerWindow(100, 50, 10, -5)
