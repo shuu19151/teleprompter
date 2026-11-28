@@ -111,7 +111,9 @@ export function createRecorderView({ getPanelMode, getCapturePhase, getPlayback,
           </div>
           <div class="recorder-bar">
             <div class="recorder-mic">
-              <select class="mic-select" id="recorder-mic" aria-label="Microphone"></select>
+              <button class="mic-select" id="recorder-mic" type="button" aria-label="Choose microphone" aria-haspopup="dialog">
+                <span class="mic-select-label">Microphone</span>
+              </button>
             </div>
             <p class="recorder-clock" id="recorder-clock">00:00.00</p>
             <div class="recorder-actions">

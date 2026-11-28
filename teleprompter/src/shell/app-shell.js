@@ -8,6 +8,9 @@ export function mountApp({
   onTakesClick,
   onTakesContextMenu,
   onTakesMenuKey,
+  onTakesPointerDown,
+  onTakesPointerMove,
+  onTakesPointerEnd,
   renderSheet,
 }) {
   const app = document.querySelector('#app')
@@ -34,6 +37,10 @@ ${confirmDialog.markup()}
   takesList?.addEventListener('click', onTakesClick)
   takesList?.addEventListener('contextmenu', onTakesContextMenu)
   takesList?.addEventListener('keydown', onTakesMenuKey)
+  takesList?.addEventListener('pointerdown', onTakesPointerDown)
+  takesList?.addEventListener('pointermove', onTakesPointerMove)
+  takesList?.addEventListener('pointerup', onTakesPointerEnd)
+  takesList?.addEventListener('pointercancel', onTakesPointerEnd)
   confirmDialog.bind()
   importDialog.bind()
   sidebar.renderList()

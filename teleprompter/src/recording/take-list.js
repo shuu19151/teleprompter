@@ -32,6 +32,14 @@ export function createTakeList({
 }) {
   let takesToken = 0
   let shownTakes = []
+  let hold = null
+  let suppressClick = false
+
+  function cancelTakeHold() {
+    if (!hold) return
+    clearTimeout(hold.timer)
+    hold = null
+  }
 
   function markActiveTake() {
     const playback = getPlayback()
@@ -183,6 +191,7 @@ export function createTakeList({
   }
 
   function onTakesContextMenu(event) {
+    cancelTakeHold()
     const source = elementFromEvent(event)
     const row = source?.closest('.take-row')
     if (!row) return
@@ -202,6 +211,11 @@ export function createTakeList({
   }
 
   function onTakesClick(event) {
+    if (suppressClick) {
+      suppressClick = false
+      event.preventDefault()
+      return
+    }
     const row = event.target.closest('.take-row')
     if (!row) return
     const options = event.target.closest('.take-options')
@@ -212,6 +226,42 @@ export function createTakeList({
     }
     const id = row.dataset.takeId
     if (id) void playShownTake(id)
+  }
+
+  function onTakesPointerDown(event) {
+    if (event.pointerType === 'mouse' && event.button !== 0) return
+    const source = elementFromEvent(event)
+    const row = source?.closest('.take-row')
+    if (!row) return
+    cancelTakeHold()
+    const startX = event.clientX
+    const startY = event.clientY
+    const pointerId = event.pointerId
+    hold = {
+      pointerId,
+      startX,
+      startY,
+      timer: setTimeout(() => {
+        if (!hold || hold.pointerId !== pointerId) return
+        hold = null
+        suppressClick = true
+        setTimeout(() => {
+          suppressClick = false
+        }, 800)
+        navigator.vibrate?.(18)
+        const rect = row.getBoundingClientRect()
+        openTakeMenu(row, rect.right - 12, rect.bottom, source instanceof HTMLElement ? source : row)
+      }, 500),
+    }
+  }
+
+  function onTakesPointerMove(event) {
+    if (!hold || hold.pointerId !== event.pointerId) return
+    if (Math.hypot(event.clientX - hold.startX, event.clientY - hold.startY) > 10) cancelTakeHold()
+  }
+
+  function onTakesPointerEnd(event) {
+    if (!hold || hold.pointerId === event.pointerId) cancelTakeHold()
   }
 
   function bindExternalChanges() {
@@ -239,6 +289,9 @@ export function createTakeList({
     markActiveTake,
     renderTakes,
     onTakesClick,
+    onTakesPointerDown,
+    onTakesPointerMove,
+    onTakesPointerEnd,
     onTakesContextMenu,
     onTakesMenuKey,
   }

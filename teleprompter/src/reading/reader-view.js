@@ -122,8 +122,7 @@ export function createReaderView({
     document.querySelector('#rec-stage')?.addEventListener('click', () => {
       void recording.toggleRecording()
     })
-    document.querySelector('#mic-idle')?.addEventListener('change', recording.onMicChange)
-    document.querySelector('#recorder-mic')?.addEventListener('change', recording.onMicChange)
+    recording.bindMicPicker()
     recording.renderMicSelects()
     document.querySelector('#recorder-stop')?.addEventListener('click', () => {
       void recording.finishRecording()
@@ -234,7 +233,9 @@ export function createReaderView({
       </div>
       <div class="mic-row" id="mic-row">
         ${MIC_ICON}
-        <select class="mic-select" id="mic-idle" aria-label="Microphone"></select>
+        <button class="mic-select" id="mic-idle" type="button" aria-label="Choose microphone" aria-haspopup="dialog">
+          <span class="mic-select-label">Microphone</span>
+        </button>
       </div>
       <div class="stage-frame" id="stage-frame">
       ${recording.recorderPanelHtml()}

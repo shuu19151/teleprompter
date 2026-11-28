@@ -35,6 +35,7 @@ test('the reader opens the mic with the sheet and does not render voice enhance'
     isRecWithRun: () => true,
     renderTakes: () => Promise.resolve(),
     renderMicSelects() {},
+    bindMicPicker() {},
     resetRulerTrack() {},
     syncRecUi() {},
     restoreRecorderPanel() {},

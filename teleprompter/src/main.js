@@ -222,6 +222,9 @@ async function start() {
     onTakesClick: recorder.onTakesClick,
     onTakesContextMenu: recorder.onTakesContextMenu,
     onTakesMenuKey: recorder.onTakesMenuKey,
+    onTakesPointerDown: recorder.onTakesPointerDown,
+    onTakesPointerMove: recorder.onTakesPointerMove,
+    onTakesPointerEnd: recorder.onTakesPointerEnd,
     renderSheet: view.renderSheet,
   })
   if (inTauri()) {
