@@ -239,6 +239,7 @@ test('a short recording creates a take', async ({ page }) => {
   await page.locator('#recorder-panel').getByRole('button', { name: 'Stop recording' }).click()
   await expect(page.locator('#takes-list .take-row')).toHaveCount(1)
   await expect(page.locator('#takes-list .take-select')).toBeVisible()
+  await expect(page.locator('#takes-list .take-options')).toHaveCount(0)
   await expect(page.locator('#takes-list')).not.toContainText('No takes yet')
   await expect.poll(() => page.locator('.take-select').evaluate((node) => getComputedStyle(node).appearance)).toBe('none')
 

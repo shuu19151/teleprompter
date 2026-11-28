@@ -69,7 +69,6 @@ export function createTakeList({
           <span class="take-duration">${deps.escapeHtml(duration)}</span>
         </span>
       </button>
-      ${inTauri() && /Android/i.test(navigator.userAgent) ? '<button type="button" class="take-options" aria-label="Recording options" aria-haspopup="menu">⋮</button>' : ''}
     </li>`
   }
 
@@ -218,12 +217,6 @@ export function createTakeList({
     }
     const row = event.target.closest('.take-row')
     if (!row) return
-    const options = event.target.closest('.take-options')
-    if (options) {
-      const rect = options.getBoundingClientRect()
-      openTakeMenu(row, rect.left, rect.bottom, options)
-      return
-    }
     const id = row.dataset.takeId
     if (id) void playShownTake(id)
   }
