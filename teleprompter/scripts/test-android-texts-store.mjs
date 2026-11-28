@@ -5,7 +5,7 @@ const calls = []
 let nextHandler = null
 
 mock.module('@tauri-apps/api/core', {
-  exports: {
+  namedExports: {
     Resource: class {},
     Channel: class {},
     invoke: async (command, args) => {
