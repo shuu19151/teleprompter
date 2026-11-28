@@ -1,9 +1,9 @@
 import { formatClock, formatFine } from './recording.js'
 
 export const WAVE_STEP_MS = 40
-export const RULER_STEP_MS = 400
+export const RULER_STEP_MS = 500
 export const RULER_MAJOR_EVERY = 4
-export const RULER_SIDE_MAJORS = 4.5
+export const RULER_SIDE_MAJORS = 3.6
 
 export function takeTextKey(item) {
   if (!item) return ''
@@ -95,10 +95,6 @@ export function playbackSampleWindow({ nowSec, centerX, pxPerSec, width, step, o
   const first = Math.max(0, firstAbs - origin)
   const last = Math.min(length, lastAbs - origin + 1)
   return { first, last }
-}
-
-export function timeAtPointer({ x, centerX, pxPerSec, now }) {
-  return now + (x - centerX) / pxPerSec
 }
 
 export function chooseTakes(takes, item) {

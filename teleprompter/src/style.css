@@ -1381,8 +1381,11 @@ html.is-reading-fullscreen .mic-row {
 }
 
 .recorder-panel[data-mode="playback"] .recorder-wave-wrap {
-  cursor: pointer;
+  cursor: grab;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .recorder-playhead {
